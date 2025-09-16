@@ -684,115 +684,136 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         return g;
     };
 
-    const drawRoadNetworkWithArcs = () => {
-        if (!roadOutlines.current) return;
-        roadOutlines.current.removeChildren();
-        const segments = state.segments;
-        if (!segments.length) return;
-        let outlineFilletCount = 0;
-        // Construir mapa de nós -> segmentos incidentes
-                const key = (p: Point) => nodeKey(p);
-        type EndInfo = { seg: Segment; atStart: boolean; p: Point };
-        const nodeMap: Record<string, EndInfo[]> = {};
-        for (const s of segments) {
-            (nodeMap[key(s.r.start)] ||= []).push({ seg: s, atStart: true, p: s.r.start });
-            (nodeMap[key(s.r.end)] ||= []).push({ seg: s, atStart: false, p: s.r.end });
-        }
-        // Para cada segmento, desenhamos seu polígono base sem tampas arredondadas; os cantos serão conectados via arcs por nó.
-        // Estratégia: gerar uma shape grande mesclando retângulos + cantos com arcs. Simples: desenhar cada segmento retangular e, depois, por nó, desenhar um disco/arco para suavizar.
-        // Para evitar sobrecarga, aproximamos arcTo desenhando polígonos com arcs internos que conectam as bordas externas das vias.
-        // Implementação simplificada: desenhar cada retângulo + desenhar um círculo de raio adaptado no nó como máscara adicional (union visual) para suavizar.
-        const container = new PIXI.Container();
-        // 1. Retângulos das vias
-        for (const s of segments) {
-            const rect = drawRoundedSegment(s, (config as any).render.baseRoadColor ?? 0xA1AFA9, s.width, 0, 0, 'butt', 'butt');
-            container.addChild(rect);
-        }
-        // 2. Arcos (discos) nas interseções
-        const radiusFactor = (config as any).render.sharpAngleRadiusFactor || 2.0;
-        const concaveFactor = (config as any).render.intersectionConcaveFactor || 0.4; // reutilizado para não criar novo param
-        const drawn: Record<string, boolean> = {};
-        for (const [k, infos] of Object.entries(nodeMap)) {
-            if (infos.length < 2) continue;
-            if (drawn[k]) continue;
-            if (infos.length === 2) {
-                // Para outlines mantemos retângulos; fillet específico já aparece no fill, opcional implementar aqui
-                // (Poderíamos desenhar createFillet separado, mas evitar duplicar massa visual.)
-            } else {
-                const diamond = createRoundedDiamond(infos[0].p, infos.map(i=>i.seg) as any);
-                if (diamond) { container.addChild(diamond); outlineFilletCount++; }
-            }
-            drawn[k] = true;
-        }
-        // Renderizar container para uma única textura para reduzir overdraw? (Futuro) – por enquanto, adiciona direto.
-        roadOutlines.current.addChild(container);
-        if ((config as any).render.debugSummary) {
-            console.log('[RenderSummary] filletsOutline=', outlineFilletCount);
-        }
-    };
+    const getRoadPolygons = (segments: Segment[], trimMap: Map<Segment, { start: number; end: number }>) => {
+        const roadPolygons: Point[][] = [];
+        if ((config as any).render.useArcToSmoothing) {
+            const nodeMap = (() => {
+                const key = (p: Point) => `${Math.round(p.x)}:${Math.round(p.y)}`;
+                const map: Record<string, { p: Point; segs: Segment[] }> = {};
+                for (const s of segments) {
+                    (map[key(s.r.start)] ||= { p: s.r.start, segs: [] }).segs.push(s);
+                    (map[key(s.r.end)] ||= { p: s.r.end, segs: [] }).segs.push(s);
+                }
+                return map;
+            })();
 
-    // (Função antiga drawRoadFillWithArcs removida – lógica substituída por novo bloco direto na fase principal de desenho)
+            segments.forEach(segment => {
+                const tr = trimMap.get(segment) || { start: 0, end: 0 };
+                const sW0 = segment.r.start;
+                const eW0 = segment.r.end;
+                const vx0 = eW0.x - sW0.x;
+                const vy0 = eW0.y - sW0.y;
+                const len0 = Math.hypot(vx0, vy0) || 1;
+                const ux = vx0 / len0, uy = vy0 / len0;
+                const sW = { x: sW0.x + ux * tr.start, y: sW0.y + uy * tr.start };
+                const eW = { x: eW0.x - ux * tr.end, y: eW0.y - uy * tr.end };
+                const vx = eW.x - sW.x;
+                const vy = eW.y - sW.y;
+                const len = Math.sqrt(vx * vx + vy * vy) || 1;
+                const hx = (-vy / len) * (segment.width / 2);
+                const hy = (vx / len) * (segment.width / 2);
+
+                const p1 = { x: sW.x + hx, y: sW.y + hy };
+                const p2 = { x: sW.x - hx, y: sW.y - hy };
+                const p3 = { x: eW.x - hx, y: eW.y - hy };
+                const p4 = { x: eW.x + hx, y: eW.y + hy };
+                roadPolygons.push([p1, p2, p3, p4]);
+            });
+
+            const radiusFactor = (config as any).render.sharpAngleRadiusFactor || 2.0;
+            for (const node of Object.values(nodeMap)) {
+                if (node.segs.length === 2) {
+                    const g = (createFillet as any)(node.p, node.segs[0], node.segs[1], radiusFactor);
+                    if (g) {
+                        const points = g.geometry.graphicsData[0].shape.points;
+                        const poly: Point[] = [];
+                        for(let i = 0; i < points.length; i+=2) {
+                            poly.push({x: points[i], y: points[i+1]});
+                        }
+                        roadPolygons.push(poly);
+                    }
+                } else if (node.segs.length >= 3) {
+                    const diamond = createRoundedDiamond(node.p, node.segs as any);
+                    if (diamond) {
+                        const points = diamond.geometry.graphicsData[0].shape.points;
+                        const poly: Point[] = [];
+                        for(let i = 0; i < points.length; i+=2) {
+                            poly.push({x: points[i], y: points[i+1]});
+                        }
+                        roadPolygons.push(poly);
+                    }
+                }
+            }
+        } else {
+            segments.forEach(segment => {
+                const tr = trimMap.get(segment) || { start: 0, end: 0 };
+                const sW0 = segment.r.start;
+                const eW0 = segment.r.end;
+                const vx0 = eW0.x - sW0.x;
+                const vy0 = eW0.y - sW0.y;
+                const len0 = Math.hypot(vx0, vy0) || 1;
+                const ux = vx0 / len0, uy = vy0 / len0;
+                const sW = { x: sW0.x + ux * tr.start, y: sW0.y + uy * tr.start };
+                const eW = { x: eW0.x - ux * tr.end, y: eW0.y - uy * tr.end };
+                const vx = eW.x - sW.x;
+                const vy = eW.y - sW.y;
+                const len = Math.sqrt(vx * vx + vy * vy) || 1;
+                const hx = (-vy / len) * (segment.width / 2);
+                const hy = (vx / len) * (segment.width / 2);
+
+                const p1 = { x: sW.x + hx, y: sW.y + hy };
+                const p2 = { x: sW.x - hx, y: sW.y - hy };
+                const p3 = { x: eW.x - hx, y: eW.y - hy };
+                const p4 = { x: eW.x + hx, y: eW.y + hy };
+                roadPolygons.push([p1, p2, p3, p4]);
+            });
+        }
+        return roadPolygons;
+    }
 
     // Desenha o contorno das vias conforme o modo atual
     const drawRoadOutlines = () => {
         if (!roadOutlines.current) return;
         roadOutlines.current.removeChildren();
-        const segments = state.segments;
-        if ((config as any).render.roadOutlineMode === 'segments') {
-            if ((config as any).render.useArcToSmoothing) {
-                drawRoadNetworkWithArcs();
-            } else {
-                for (const segment of segments) {
-                    const g = drawRoundedSegment(segment, (config as any).render.baseRoadColor ?? 0xA1AFA9, segment.width, 0, 0, 'butt', 'butt');
-                    roadOutlines.current.addChild(g);
+        const roadPolygons = getRoadPolygons(state.segments, new Map());
+        const roadOutlineGraphics = new PIXI.Graphics();
+        roadOutlineGraphics.lineStyle(2, (config as any).render.roadOutlineColor ?? 0x333740);
+        roadPolygons.forEach(poly => {
+            const points = poly.map(p => worldToIso(p));
+            if (points.length > 0) {
+                roadOutlineGraphics.moveTo(points[0].x, points[0].y);
+                for (let i = 1; i < points.length; i++) {
+                    roadOutlineGraphics.lineTo(points[i].x, points[i].y);
                 }
+                roadOutlineGraphics.closePath();
             }
-    } else if ((config as any).render.roadOutlineMode === 'hull') {
-        const pts: Point[] = [];
-        segments.forEach(segment => {
-            const s = segment.r.start, e = segment.r.end;
-            const vx = e.x - s.x, vy = e.y - s.y;
-            const len = Math.hypot(vx, vy) || 1;
-            const nx = -vy / len, ny = vx / len;
-            const r = segment.width / 2;
-            const a = { x: s.x + nx * r, y: s.y + ny * r };
-            const d = { x: e.x + nx * r, y: e.y + ny * r };
-            const b = { x: s.x - nx * r, y: s.y - ny * r };
-            const c = { x: e.x - nx * r, y: e.y - ny * r };
-            pts.push(a, b, c, d);
         });
-        const hull = (() => {
-            const P = pts
-                .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y))
-                .sort((p1, p2) => (p1.x === p2.x ? p1.y - p2.y : p1.x - p2.x));
-            const cross = (o: Point, a: Point, b: Point) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-            const lower: Point[] = [];
-            for (const p of P) {
-                while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-                lower.push(p);
+        roadOutlines.current.addChild(roadOutlineGraphics);
+    };
+
+    const drawRoadOutlines = () => {
+        if (!roadOutlines.current) return;
+        roadOutlines.current.removeChildren();
+        if ((config as any).render.roadOutlineMode === 'hull') {
+            const roadPolygons = getRoadPolygons(state.segments, new Map());
+            const roadOutlineGraphics = new PIXI.Graphics();
+            roadOutlineGraphics.lineStyle(2, (config as any).render.roadOutlineColor ?? 0x333740);
+            roadPolygons.forEach(poly => {
+                const points = poly.map(p => worldToIso(p));
+                if (points.length > 0) {
+                    roadOutlineGraphics.moveTo(points[0].x, points[0].y);
+                    for (let i = 1; i < points.length; i++) {
+                        roadOutlineGraphics.lineTo(points[i].x, points[i].y);
+                    }
+                    roadOutlineGraphics.closePath();
+                }
+            });
+            roadOutlines.current.addChild(roadOutlineGraphics);
+        } else {
+            for (const segment of state.segments) {
+                const g = drawRoundedSegment(segment, (config as any).render.baseRoadColor ?? 0xA1AFA9, segment.width, 0, 0, 'butt', 'butt');
+                roadOutlines.current.addChild(g);
             }
-            const upper: Point[] = [];
-            for (let i = P.length - 1; i >= 0; i--) {
-                const p = P[i];
-                while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-                upper.push(p);
-            }
-            upper.pop(); lower.pop();
-            return lower.concat(upper);
-        })();
-        if (hull.length >= 3) {
-            // Preenchimento cinza claro SEMPRE
-            const gFill = new PIXI.Graphics();
-            gFill.beginFill((config as any).render.baseRoadColor ?? 0xA1AFA9, (config as any).render.baseRoadAlpha ?? 1.0);
-            const hullIso = hull.map(worldToIso);
-            gFill.moveTo(hullIso[0].x, hullIso[0].y);
-            for (let i = 1; i < hullIso.length; i++) gFill.lineTo(hullIso[i].x, hullIso[i].y);
-            gFill.closePath();
-            gFill.endFill();
-            roadOutlines.current.addChild(gFill);
-            // Contorno só se ativado (true)
-            // Contorno externo removido (transparente) – apenas preenchimento
-        }
         }
     };
 
@@ -1736,45 +1757,21 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
 
         // Desenhar vias (preenchimento) sempre visível
         roadsFill.current?.removeChildren();
-            if ((config as any).render.useArcToSmoothing) {
-                // Novo: aplicar mesmos fillets dentro do preenchimento
-                const container = new PIXI.Container();
-                const radiusFactor = (config as any).render.sharpAngleRadiusFactor || 2.0;
-                // Retângulos (trim)
-                segments.forEach(segment => {
-                    const tr = trimMap.get(segment) || { start: 0, end: 0 };
-                    container.addChild(drawRoundedSegment(segment, (config as any).render.baseRoadColor ?? 0xA1AFA9, segment.width, tr.start, tr.end, 'butt', 'butt'));
-                });
-                // Fillets
-                const nodeMap = (() => {
-                    const key = (p: Point) => `${Math.round(p.x)}:${Math.round(p.y)}`;
-                    const map: Record<string, { p: Point; segs: Segment[] }> = {};
-                    for (const s of segments) {
-                        (map[key(s.r.start)] ||= { p: s.r.start, segs: [] }).segs.push(s);
-                        (map[key(s.r.end)] ||= { p: s.r.end, segs: [] }).segs.push(s);
-                    }
-                    return map;
-                })();
-                let filletFillCount = 0;
-                for (const node of Object.values(nodeMap)) {
-                    if (node.segs.length === 2) {
-                        const g = (createFillet as any)(node.p, node.segs[0], node.segs[1], radiusFactor);
-                        if (g) { container.addChild(g); filletFillCount++; }
-                    } else if (node.segs.length >= 3) {
-                        const diamond = createRoundedDiamond(node.p, node.segs as any);
-                        if (diamond) { container.addChild(diamond); }
-                    }
+        const roadPolygons = getRoadPolygons(segments, trimMap);
+        const roadFillGraphics = new PIXI.Graphics();
+        roadFillGraphics.beginFill((config as any).render.baseRoadColor ?? 0xA1AFA9);
+        roadPolygons.forEach(poly => {
+            const points = poly.map(p => worldToIso(p));
+            if (points.length > 0) {
+                roadFillGraphics.moveTo(points[0].x, points[0].y);
+                for (let i = 1; i < points.length; i++) {
+                    roadFillGraphics.lineTo(points[i].x, points[i].y);
                 }
-                if ((config as any).render.debugSummary) {
-                    console.log('[RenderSummary] filletsFill=', filletFillCount);
-                }
-                roadsFill.current?.addChild(container);
-            } else {
-                segments.forEach(segment => {
-                    const tr = trimMap.get(segment) || { start: 0, end: 0 };
-                    roadsFill.current?.addChild(drawRoundedSegment(segment, (config as any).render.baseRoadColor ?? 0xA1AFA9, segment.width, tr.start, tr.end, 'butt', 'butt'));
-                });
+                roadFillGraphics.closePath();
             }
+        });
+        roadFillGraphics.endFill();
+        roadsFill.current?.addChild(roadFillGraphics);
         // Desenhar camada secundária de vias (overlay) se habilitada
         drawSecondaryRoadLayer(segments);
         // Aplicar overlay de rachaduras nas vias se houver textura definida
