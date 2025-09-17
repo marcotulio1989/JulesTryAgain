@@ -350,7 +350,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     const drawPolygon = (polygon: blockGeometry.Polygon, color: number, alpha: number = 1.0) => {
         const g = new PIXI.Graphics();
         g.beginFill(color, alpha);
-        
+
         if (polygon.vertices.length > 0) {
             const firstVertex = worldToIso(polygon.vertices[0]);
             g.moveTo(firstVertex.x, firstVertex.y);
@@ -365,6 +365,214 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         
         g.endFill();
         return g;
+    };
+
+    const sqrDist = (a: Point, b: Point): number => {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return dx * dx + dy * dy;
+    };
+
+    const pushUniquePoint = (pts: Point[], pt: Point, eps = 1e-6) => {
+        if (pts.length === 0) {
+            pts.push({ x: pt.x, y: pt.y });
+            return;
+        }
+        const last = pts[pts.length - 1];
+        if (sqrDist(last, pt) < eps * eps) return;
+        pts.push({ x: pt.x, y: pt.y });
+    };
+
+    const sanitizeLoopPoints = (points: Point[]): Point[] => {
+        const sanitized: Point[] = [];
+        const eps2 = 1e-8;
+        for (let i = 0; i < points.length; i++) {
+            const curr = points[i];
+            const next = points[(i + 1) % points.length];
+            sanitized.push({ x: curr.x, y: curr.y });
+            if (i < points.length - 1 && sqrDist(curr, next) < eps2) {
+                sanitized.pop();
+            }
+        }
+        if (sanitized.length > 2) {
+            const first = sanitized[0];
+            const last = sanitized[sanitized.length - 1];
+            if (sqrDist(first, last) < eps2) sanitized.pop();
+        }
+        return sanitized;
+    };
+
+    const roundPolygonPoints = (points: Point[], radius: number): Point[] => {
+        if (!points || points.length < 3 || radius <= 0) {
+            return points.map(p => ({ x: p.x, y: p.y }));
+        }
+
+        const sanitized = sanitizeLoopPoints(points);
+        if (sanitized.length < 3) return sanitized;
+
+        let area = 0;
+        for (let i = 0; i < sanitized.length; i++) {
+            const p = sanitized[i];
+            const q = sanitized[(i + 1) % sanitized.length];
+            area += p.x * q.y - q.x * p.y;
+        }
+        const isCCW = area > 0;
+
+        type CornerData = {
+            hasArc: boolean;
+            start: Point;
+            end: Point;
+            center: Point;
+            radius: number;
+            startAngle: number;
+            endAngle: number;
+            original: Point;
+        };
+
+        const corners: CornerData[] = sanitized.map(p => ({
+            hasArc: false,
+            start: { x: p.x, y: p.y },
+            end: { x: p.x, y: p.y },
+            center: { x: p.x, y: p.y },
+            radius: 0,
+            startAngle: 0,
+            endAngle: 0,
+            original: { x: p.x, y: p.y }
+        }));
+
+        for (let i = 0; i < sanitized.length; i++) {
+            const prev = sanitized[(i - 1 + sanitized.length) % sanitized.length];
+            const curr = sanitized[i];
+            const next = sanitized[(i + 1) % sanitized.length];
+
+            const edgePrev = { x: curr.x - prev.x, y: curr.y - prev.y };
+            const edgeNext = { x: next.x - curr.x, y: next.y - curr.y };
+            const lenPrev = Math.hypot(edgePrev.x, edgePrev.y);
+            const lenNext = Math.hypot(edgeNext.x, edgeNext.y);
+            if (!isFinite(lenPrev) || !isFinite(lenNext) || lenPrev < 1e-6 || lenNext < 1e-6) {
+                continue;
+            }
+
+            const cross = edgePrev.x * edgeNext.y - edgePrev.y * edgeNext.x;
+            const isConvex = isCCW ? cross > 1e-6 : cross < -1e-6;
+            if (!isConvex) continue;
+
+            const inDir = { x: -edgePrev.x / lenPrev, y: -edgePrev.y / lenPrev };
+            const outDir = { x: edgeNext.x / lenNext, y: edgeNext.y / lenNext };
+            let dot = inDir.x * outDir.x + inDir.y * outDir.y;
+            if (dot <= -1) dot = -1;
+            if (dot >= 1) dot = 1;
+            const angle = Math.acos(dot);
+            if (!isFinite(angle) || angle < 1e-3) continue;
+            const tanHalf = Math.tan(angle / 2);
+            if (!isFinite(tanHalf) || tanHalf <= 1e-6) continue;
+
+            const maxRadius = Math.min(radius, lenPrev * tanHalf, lenNext * tanHalf);
+            if (!isFinite(maxRadius) || maxRadius <= 1e-6) continue;
+            const offset = maxRadius / tanHalf;
+
+            const start = { x: curr.x + inDir.x * offset, y: curr.y + inDir.y * offset };
+            const end = { x: curr.x + outDir.x * offset, y: curr.y + outDir.y * offset };
+
+            const dirPrev = { x: edgePrev.x / lenPrev, y: edgePrev.y / lenPrev };
+            const dirNext = { x: edgeNext.x / lenNext, y: edgeNext.y / lenNext };
+            const normalPrev = isCCW ? { x: -dirPrev.y, y: dirPrev.x } : { x: dirPrev.y, y: -dirPrev.x };
+            const normalNext = isCCW ? { x: -dirNext.y, y: dirNext.x } : { x: dirNext.y, y: -dirNext.x };
+
+            const center1 = { x: start.x + normalPrev.x * maxRadius, y: start.y + normalPrev.y * maxRadius };
+            const center2 = { x: end.x + normalNext.x * maxRadius, y: end.y + normalNext.y * maxRadius };
+            const center = { x: (center1.x + center2.x) / 2, y: (center1.y + center2.y) / 2 };
+
+            let startAngle = Math.atan2(start.y - center.y, start.x - center.x);
+            let endAngle = Math.atan2(end.y - center.y, end.x - center.x);
+            if (isCCW) {
+                if (endAngle <= startAngle) endAngle += Math.PI * 2;
+            } else {
+                if (endAngle >= startAngle) endAngle -= Math.PI * 2;
+            }
+
+            const angleSpan = Math.abs(endAngle - startAngle);
+            if (!isFinite(angleSpan) || angleSpan < 1e-3) continue;
+
+            corners[i] = {
+                hasArc: true,
+                start,
+                end,
+                center,
+                radius: maxRadius,
+                startAngle,
+                endAngle,
+                original: { x: curr.x, y: curr.y }
+            };
+        }
+
+        const result: Point[] = [];
+        const firstCorner = corners[0];
+        if (firstCorner.hasArc) {
+            pushUniquePoint(result, firstCorner.start);
+        } else {
+            pushUniquePoint(result, firstCorner.original);
+        }
+
+        for (let i = 0; i < corners.length; i++) {
+            const data = corners[i];
+            const next = corners[(i + 1) % corners.length];
+            if (data.hasArc) {
+                const span = data.endAngle - data.startAngle;
+                const steps = Math.max(2, Math.ceil(Math.abs(span) / (Math.PI / 24)));
+                for (let step = 1; step <= steps; step++) {
+                    const t = step / steps;
+                    const angle = data.startAngle + span * t;
+                    const pt = {
+                        x: data.center.x + Math.cos(angle) * data.radius,
+                        y: data.center.y + Math.sin(angle) * data.radius
+                    };
+                    pushUniquePoint(result, pt);
+                }
+            } else {
+                pushUniquePoint(result, data.original);
+            }
+
+            const nextStart = next.hasArc ? next.start : next.original;
+            pushUniquePoint(result, nextStart);
+        }
+
+        if (result.length > 2) {
+            const first = result[0];
+            const last = result[result.length - 1];
+            if (sqrDist(first, last) < 1e-8) result.pop();
+        }
+
+        return result;
+    };
+
+    const computeRoundedBlockPolygons = (paths: any[], radius: number, scaleFactor: number) => {
+        const fallbackWorld: Point[][] = paths.map((path: any) => {
+            const pts = path.map((p: any) => ({ x: p.X / scaleFactor, y: p.Y / scaleFactor }));
+            return sanitizeLoopPoints(pts);
+        });
+
+        if (!radius || radius <= 0) {
+            const clipperCopy = paths.map((path: any) => path.slice());
+            return { world: fallbackWorld, clipper: clipperCopy };
+        }
+
+        const world: Point[][] = [];
+        const clipper: any[] = [];
+
+        fallbackWorld.forEach((pts, idx) => {
+            const rounded = roundPolygonPoints(pts, radius);
+            if (rounded.length >= 3) {
+                world.push(rounded);
+                clipper.push(rounded.map(pt => ({ X: Math.round(pt.x * scaleFactor), Y: Math.round(pt.y * scaleFactor) })));
+            } else {
+                world.push(pts);
+                const original = paths[idx] || [];
+                clipper.push(original.slice());
+            }
+        });
+
+        return { world, clipper };
     };
 
     // Função para desenhar quarteirões com esquinas curvas
@@ -2186,6 +2394,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
             }
             
             const insideBlocks = blockPaths;
+            const cornerRadiusM = Math.max(0, (config as any).render.blockCornerRadiusM ?? 0);
+            const roundedBlocks = computeRoundedBlockPolygons(insideBlocks, cornerRadiusM, CLIP_SCALE);
+            const blockWorldPaths = roundedBlocks.world;
+            const blockClipperPaths = roundedBlocks.clipper;
 
             // Se o modo "apenas interiores" estiver ativo, desenhe-os com um recuo e retorne.
             if (showOnlyInteriors) {
@@ -2200,18 +2412,22 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 const gap = (config as any).render.blockInteriorGapM;
 
                 // Aplicar um recuo (inset) se houver um gap configurado
-                let pathsToDraw = insideBlocks;
-                if (gap > 0 && insideBlocks.length > 0) {
+                let pathsToDraw = blockClipperPaths;
+                if (gap > 0 && blockClipperPaths.length > 0) {
                     const co = new ClipperLib.ClipperOffset();
-                    co.AddPaths(insideBlocks, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+                    co.AddPaths(blockClipperPaths, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
                     const insetPaths = new ClipperLib.Paths();
                     co.Execute(insetPaths, -gap * CLIP_SCALE);
                     pathsToDraw = insetPaths;
                 }
 
+                const worldPathsToDraw: Point[][] = (gap > 0)
+                    ? pathsToDraw.map((path: any) => path.map((p: any) => ({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE })))
+                    : blockWorldPaths;
+
                 // Desenhar os polígonos resultantes
-                pathsToDraw.forEach((path: any) => {
-                    const points = path.map((p: any) => worldToIso({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE }));
+                worldPathsToDraw.forEach((worldPts: Point[]) => {
+                    const points = worldPts.map(p => worldToIso(p));
                     if (points.length > 2) {
                         const useTex = !!(config as any).render.blockInteriorUseTexture && interiorTexture;
                         if (useTex) {
@@ -2233,7 +2449,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         g.endFill();
                     }
                 });
-                
+
                 blockOutlines.current.addChild(g);
                 return; // Pula o resto do desenho que não é necessário neste modo
             }
@@ -2264,7 +2480,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
 
             // Expandir a união das ruas para criar a área do "gap"
             const co = new ClipperLib.ClipperOffset();
-            co.AddPaths(roadUnionPaths, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+            co.AddPaths(roadUnionPaths, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
             const expandedPaths = new ClipperLib.Paths();
             co.Execute(expandedPaths, roadGapM * CLIP_SCALE);
 
@@ -2302,9 +2518,9 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 const scol = rCfg.blockShadowColor ?? 0x000000;
                 const salpha = rCfg.blockShadowAlpha ?? 0.2;
                 shadowContainer.alpha = salpha;
-                insideBlocks.forEach((path: any) => {
-                    const points = path.map((p: any) => {
-                        const iso = worldToIso({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE });
+                blockWorldPaths.forEach((worldPts: Point[]) => {
+                    const points = worldPts.map(p => {
+                        const iso = worldToIso(p);
                         return { x: iso.x + off.x, y: iso.y + off.y };
                     });
                     if (points.length > 2) {
@@ -2316,8 +2532,8 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 gInner.addChild(shadowContainer);
             }
 
-            insideBlocks.forEach((path: any) => {
-                const points = path.map((p: any) => worldToIso({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE }));
+            blockWorldPaths.forEach((worldPts: Point[]) => {
+                const points = worldPts.map(p => worldToIso(p));
                 if (points.length > 2) {
                     const useTex = !!(config as any).render.blockInteriorUseTexture && interiorTexture;
                     if (useTex) {
@@ -2361,7 +2577,6 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         const secondEnabled = !!rCfg.blockEdgeBandSecondEnabled;
                         const thickness2M = rCfg.blockEdgeBand2ThicknessM ?? 1.0;
                         const band2Alpha = rCfg.blockEdgeBand2Alpha ?? bandAlpha;
-                        const worldPts = path.map((p: any) => ({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE }));
                         // Determinar orientação do polígono (para garantir normal externa correta)
                         let area2 = 0;
                         for (let i = 0; i < worldPts.length; i++) {
@@ -2525,15 +2740,14 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 try { console.debug('[GameCanvas] edgeTexture prop present=', !!edgeTextureRef.current, 'edgeOverlayChildrenBefore=', edgeOverlay.current?.children.length); } catch (e) {}
                 const useEdge = !!edgeTexture && !!(config as any).render.edgeUseTexture;
                 // debug log
-                try { console.log('[edgeOverlay] useEdge=', useEdge, 'edgeTex=', !!edgeTexture, 'blocks=', insideBlocks.length); } catch(e) {}
+                try { console.log('[edgeOverlay] useEdge=', useEdge, 'edgeTex=', !!edgeTexture, 'blocks=', blockWorldPaths.length); } catch(e) {}
                 if (useEdge) {
                     const maskG = new PIXI.Graphics();
                     maskG.beginFill(0xFFFFFF);
                     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                     // iterate again over blocks to replicate band polygons
-                    insideBlocks.forEach((path: any) => {
+                    blockWorldPaths.forEach((worldPts: Point[]) => {
                         // compute band polygons similarly to above: we can approximate by offsetting edges
-                        const worldPts = path.map((p: any) => ({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE }));
                         for (let i = 0; i < worldPts.length; i++) {
                             const a = worldPts[i];
                             const b = worldPts[(i+1) % worldPts.length];
@@ -2575,8 +2789,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         const thickness2M = rCfg.blockEdgeBand2ThicknessM ?? 1.0;
                         const verticalCapsGlobal = !!rCfg.blockEdgeBandVerticalCaps;
                         const primaryIso = !!rCfg.blockEdgeBandPrimaryIsometric;
-                        insideBlocks.forEach((path: any) => {
-                            const worldPts = path.map((p: any) => ({ x: p.X / CLIP_SCALE, y: p.Y / CLIP_SCALE }));
+                        blockWorldPaths.forEach((worldPts: Point[]) => {
                             // Determine orientation as gBands does (clockwise/ccw) to match face determination
                             let area2 = 0;
                             for (let ii = 0; ii < worldPts.length; ii++) {
