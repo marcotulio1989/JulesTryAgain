@@ -7,6 +7,11 @@ export interface CrackGeneratorOptions {
     seed: number;
     scale?: number;
     color?: [number, number, number];
+    mask?: {
+        data: Uint8Array;
+        width: number;
+        height: number;
+    };
 }
 
 function makeRng(seed: number) {
@@ -35,11 +40,39 @@ export function generateVoronoiCrackImage(width: number, height: number, options
     const scale = options.scale ?? 1;
     const color: [number, number, number] = options.color ?? [58, 58, 58];
     const divisions = Math.max(8, Math.min(5000, Math.round(options.divisions)));
+    const maskInfo = options.mask;
+    let maskData: Uint8Array | null = null;
+    let maskW = 0;
+    let maskH = 0;
+    if (maskInfo && maskInfo.data && maskInfo.width > 0 && maskInfo.height > 0) {
+        maskData = maskInfo.data;
+        maskW = maskInfo.width;
+        maskH = maskInfo.height;
+    }
     const rng = makeRng(Math.floor(options.seed) || 1);
     const pts = new Float32Array(divisions * 2);
     for (let i = 0; i < divisions; i++) {
-        pts[2 * i] = rng() * sw;
-        pts[2 * i + 1] = rng() * sh;
+        if (maskData) {
+            let accepted = false;
+            for (let attempt = 0; attempt < 12; attempt++) {
+                const mx = Math.floor(rng() * maskW);
+                const my = Math.floor(rng() * maskH);
+                if (maskData[my * maskW + mx] === 0) continue;
+                const fx = (mx + rng()) / maskW;
+                const fy = (my + rng()) / maskH;
+                pts[2 * i] = fx * sw;
+                pts[2 * i + 1] = fy * sh;
+                accepted = true;
+                break;
+            }
+            if (!accepted) {
+                pts[2 * i] = rng() * sw;
+                pts[2 * i + 1] = rng() * sh;
+            }
+        } else {
+            pts[2 * i] = rng() * sw;
+            pts[2 * i + 1] = rng() * sh;
+        }
     }
 
     const cellsPerDim = Math.max(8, Math.round(Math.sqrt(divisions)));
@@ -292,9 +325,31 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     }
 
     const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
-    const divisions = (typeof crackCfg.divisions === 'number' && crackCfg.divisions > 0) ? crackCfg.divisions : 400;
     const thickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
     const dilateRadius = (typeof crackCfg.dilateRadius === 'number' && crackCfg.dilateRadius >= 0) ? crackCfg.dilateRadius : 2;
+
+    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
+    let debugMaskData: Uint8Array | null = null;
+    let debugMaskCoverage = 0;
+    if (debugMask && debugMask.data) {
+        if (debugMask.width === width && debugMask.height === height) {
+            debugMaskData = debugMask.data;
+            for (let i = 0; i < debugMaskData.length; i++) {
+                if (debugMaskData[i] !== 0) debugMaskCoverage++;
+            }
+        } else if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[crackGenerator] Ignoring debugMask due to dimension mismatch', {
+                expected: { width, height }, provided: { width: debugMask.width, height: debugMask.height }
+            });
+        }
+    }
+
+    let divisions = (typeof crackCfg.divisions === 'number' && crackCfg.divisions > 0) ? crackCfg.divisions : 0;
+    if (!(divisions > 0)) {
+        const targetCellArea = 18 * 18; // aim for ~18px spacing between seeds
+        const effectivePixels = (debugMaskCoverage > 0 ? debugMaskCoverage : (width * height)) * (quality * quality);
+        divisions = Math.max(64, Math.min(5000, Math.round(effectivePixels / targetCellArea)));
+    }
 
     const data = generateVoronoiCrackImage(canvasW, canvasH, {
         divisions,
@@ -303,6 +358,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         seed,
         scale: quality,
         color: [24, 24, 24],
+        mask: (debugMaskData && debugMaskCoverage > 0) ? { data: debugMaskData, width, height } : undefined,
     });
 
     // Keep a copy of the raw Voronoi result as a fallback in case later
@@ -317,17 +373,6 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_regionCellW = 0;
     let debug_regionCellH = 0;
     let debug_buckets = 0;
-    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
-    let debugMaskData: Uint8Array | null = null;
-    if (debugMask && debugMask.data) {
-        if (debugMask.width === width && debugMask.height === height) {
-            debugMaskData = debugMask.data;
-        } else if (typeof console !== 'undefined' && console.warn) {
-            console.warn('[crackGenerator] Ignoring debugMask due to dimension mismatch', {
-                expected: { width, height }, provided: { width: debugMask.width, height: debugMask.height }
-            });
-        }
-    }
     const captureCrashMaskActual = !!(captureCrashMask && debugMaskData);
     const crashMaskData = captureCrashMaskActual ? new Uint8Array(width * height) : null;
     let activeBuckets: Set<number> | null = null;
@@ -368,10 +413,39 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             }
         }
 
-        const stats = counts.map((c, i) => ({ i, c }));
+        const cellW = debug_regionW > 0 ? width / debug_regionW : width;
+        const cellH = debug_regionH > 0 ? height / debug_regionH : height;
+        const maskCounts = new Array<number>(buckets).fill(0);
+        let maskCovered = 0;
+        if (debugMaskData && debugMaskCoverage > 0) {
+            for (let baseY = 0; baseY < height; baseY++) {
+                for (let baseX = 0; baseX < width; baseX++) {
+                    const baseIndex = baseY * width + baseX;
+                    if (debugMaskData[baseIndex] === 0) continue;
+                    const rx = Math.max(0, Math.min(debug_regionW - 1, Math.floor(baseX / (cellW || 1))));
+                    const ry = Math.max(0, Math.min(debug_regionH - 1, Math.floor(baseY / (cellH || 1))));
+                    const bucketId = debug_regionMap![ry * debug_regionW + rx];
+                    maskCounts[bucketId]++;
+                    maskCovered++;
+                }
+            }
+        }
+
+        const baseStats = counts.map((c, i) => ({ i, c }));
+        let statsSource = baseStats;
+        let maskStatsCoverage = maskCovered;
+        if (maskCovered > 0) {
+            const maskStats = maskCounts.map((c, i) => ({ i, c })).filter(entry => entry.c > 0);
+            if (maskStats.length > 0) {
+                statsSource = maskStats;
+            } else {
+                maskStatsCoverage = 0;
+            }
+        }
+
         let picked: { i: number; c: number }[] = [];
         if (strategy === 'largest') {
-            picked = stats.slice().sort((a, b) => b.c - a.c).slice(0, maxActive);
+            picked = statsSource.slice().sort((a, b) => b.c - a.c).slice(0, maxActive);
         } else if (strategy === 'random') {
             const rng = (() => {
                 let t = (seed ^ 0x9E3779B9) >>> 0;
@@ -380,7 +454,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     return t / 0x100000000;
                 };
             })();
-            const arr = stats.slice();
+            const arr = statsSource.slice();
             for (let i = arr.length - 1; i > 0; i--) {
                 const j = Math.floor(rng() * (i + 1));
                 const tmp = arr[i];
@@ -389,9 +463,31 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             }
             picked = arr.slice(0, maxActive);
         } else {
-            picked = stats.slice().sort((a, b) => a.c - b.c).slice(0, maxActive);
+            picked = statsSource.slice().sort((a, b) => a.c - b.c).slice(0, maxActive);
         }
         activeBuckets = new Set<number>(picked.map(p => p.i));
+        if (maskStatsCoverage > 0) {
+            let intersectsMask = false;
+            for (const id of activeBuckets) {
+                if (maskCounts[id] > 0) {
+                    intersectsMask = true;
+                    break;
+                }
+            }
+            if (!intersectsMask) {
+                let bestBucket = -1;
+                let bestCount = -1;
+                for (let b = 0; b < buckets; b++) {
+                    if (maskCounts[b] > bestCount) {
+                        bestBucket = b;
+                        bestCount = maskCounts[b];
+                    }
+                }
+                if (bestBucket >= 0 && bestCount > 0) {
+                    activeBuckets = new Set<number>([bestBucket]);
+                }
+            }
+        }
         if (activeBuckets.size === 0) {
             for (let b = 0; b < buckets; b++) activeBuckets.add(b);
         }
@@ -412,8 +508,8 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         }
 
         const invQuality = 1 / quality;
-        debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
-        debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
+        debug_regionCellW = cellW;
+        debug_regionCellH = cellH;
         debug_buckets = buckets;
         sampleBucketId = (screenX: number, screenY: number) => {
             const rx = Math.max(0, Math.min(debug_regionW - 1, Math.floor(screenX / (debug_regionCellW || 1))));
@@ -475,12 +571,37 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             if (data[i + 3] > 0) { any = true; break; }
         }
         if (!any) {
-            // Restore the original Voronoi image and warn so user can adjust
+            // Restore the original Voronoi image (clamped to the debug mask) so the user isn't left without cracks
             if (typeof console !== 'undefined' && console.warn) {
                 console.warn('[crackGenerator] Noise bucket filtering removed all pixels; restoring fallback Voronoi image. Try adjusting crackNoiseParams (buckets/maxActiveBuckets) or change seed.');
             }
             data.set(_voronoiCopy);
-            if (crashMaskData) crashMaskData.fill(0);
+            if (debugMaskData) {
+                for (let y = 0; y < canvasH; y++) {
+                    for (let x = 0; x < canvasW; x++) {
+                        const idx = (y * canvasW + x) * 4;
+                        if (data[idx + 3] === 0) continue;
+                        const screenX = (x + 0.5) * invQuality;
+                        const screenY = (y + 0.5) * invQuality;
+                        const baseX = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
+                        const baseY = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
+                        const baseIndex = baseY * width + baseX;
+                        if (debugMaskData[baseIndex] === 0) {
+                            data[idx + 3] = 0;
+                        }
+                    }
+                }
+            }
+            if (crashMaskData) {
+                if (debugMaskData) {
+                    crashMaskData.fill(0);
+                    for (let i = 0; i < debugMaskData.length; i++) {
+                        if (debugMaskData[i] !== 0) crashMaskData[i] = 255;
+                    }
+                } else {
+                    crashMaskData.fill(255);
+                }
+            }
         }
     } else {
         for (let y = 0; y < canvasH; y++) {
