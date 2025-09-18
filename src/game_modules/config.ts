@@ -232,7 +232,7 @@ export const config = {
     // Suavização de ângulos agudos em interseções
     smoothSharpAngles: true,
     // Usar suavização direta com arcs (arcTo) ao invés de patches de interseção separados
-    useArcToSmoothing: false,
+    // removed: useArcToSmoothing (no longer needed, intersection patches are used)
     // Ângulo máximo (graus) considerado "agudo" que precisa de suavização
     sharpAngleThresholdDeg: 90,
     // Raio da suavização como fator da largura média das vias
@@ -285,6 +285,35 @@ export const config = {
     intersectionPatchAlwaysVisibleWithOutlines: true,
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
+    // Crack mask debug/padding controls (UI-adjustable)
+    debugCrackMask: false,
+    // Default padding (px) used for crack mask bounding boxes
+    crackMaskPaddingDefault: 4,
+    // Extra padding (px) applied when heuristic triggers — fallback default 8
+    crackMaskPaddingExtra: 8,
+    // Pixel threshold to consider a polygon vertex 'touching' the bbox edge
+    crackMaskTouchEps: 1.0,
+    // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
+    crackUseNoise: false,
+    // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
+    // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
+    // - octaves/lacunarity/gain: parâmetros de fBm.
+    // - buckets: número de regiões quantizadas no mapa de ruído.
+    // - crackBandWidth: largura da faixa em torno do centro do bucket que gera rachaduras (0.002..0.1)
+    // - maxActiveBuckets: quantos buckets são efetivamente usados para desenhar rachaduras
+    crackNoiseParams: {
+        baseScale: 1 / 480,
+        octaves: 4,
+        lacunarity: 2.0,
+        gain: 0.5,
+        buckets: 3,
+        crackBandWidth: 0.008,
+        maxActiveBuckets: 2,
+        // Escolha de quais buckets são ativados: 'smallest' (regiões menores), 'largest', 'random'
+        activeBucketStrategy: 'smallest'
+    },
+    // If true, bake cracks directly to a sprite applied to the map (no tiling sprite mask)
+    crackApplyDirect: false,
     // Mostrar apenas os contornos dos quarteirões (esconde ruas e preenchimento dos prédios)
     showOnlyBlockOutlines: false,
     // Mostrar apenas o interior dos quarteirões (preenchidos), escondendo ruas e demais elementos
