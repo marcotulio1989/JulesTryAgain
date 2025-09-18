@@ -161,6 +161,14 @@ export interface CrackRaster {
     height: number;
     quality: number;
     color: [number, number, number];
+    crashMask?: {
+        data: Uint8Array;
+        width: number;
+        height: number;
+        minX: number;
+        minY: number;
+        quality: number;
+    };
     // Optional debug info for FBM region visualization
     debugRegion?: {
         map: Uint8Array;
@@ -302,6 +310,10 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_buckets = 0;
     const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
 
+    const invQuality = 1 / quality;
+    const crashMaskRequested = !!(renderConfig?.crashMaskEnabled || renderConfig?.debugCrackMask);
+    const crashMaskData = crashMaskRequested ? new Uint8Array(width * height) : null;
+
     if (renderConfig?.crackUseNoise) {
         const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3, crackBandWidth: 0.012, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
         const baseScale = noiseCfg.baseScale || 1 / 480;
@@ -340,6 +352,14 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 counts[id]++;
             }
         }
+
+        try {
+            if (renderConfig) {
+                const bucketStats: Record<number, number> = {};
+                counts.forEach((c, i) => { bucketStats[i] = c; });
+                (renderConfig as any).detectedFbmBuckets = bucketStats;
+            }
+        } catch (e) {}
 
         const stats = counts.map((c, i) => ({ i, c }));
         let picked: { i: number; c: number }[] = [];
@@ -393,7 +413,6 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             fineScales[b] = baseScale * (1.5 + b * 0.6);
         }
 
-    const invQuality = 1 / quality;
     debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
     debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
     debug_buckets = buckets;
@@ -431,6 +450,12 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 if (alpha === 0) continue;
                 const screenX = (x + 0.5) * invQuality;
                 const screenY = (y + 0.5) * invQuality;
+                let crashMaskIndex = -1;
+                if (crashMaskData) {
+                    const mx = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
+                    const my = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
+                    crashMaskIndex = my * width + mx;
+                }
                 // If we have a full-resolution FBM mask, sample it in screen coords
                 // (mask was generated at original `width`/`height`). If mask says
                 // 'blocked', clear alpha and skip per-bucket checks.
@@ -484,6 +509,9 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     data[idx] = color[0];
                     data[idx + 1] = color[1];
                     data[idx + 2] = color[2];
+                    if (crashMaskData && crashMaskIndex >= 0) {
+                        crashMaskData[crashMaskIndex] = 255;
+                    }
                 }
             }
         }
@@ -509,7 +537,39 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         }
     }
 
+    if (crashMaskData) {
+        // If no pixels were marked (e.g. crash mask requested but noise disabled), derive mask from final alpha buffer.
+        let hasMaskPixel = false;
+        for (let i = 0; i < crashMaskData.length; i++) {
+            if (crashMaskData[i]) { hasMaskPixel = true; break; }
+        }
+        if (!hasMaskPixel) {
+            for (let y = 0; y < canvasH; y++) {
+                for (let x = 0; x < canvasW; x++) {
+                    const idx = (y * canvasW + x) * 4;
+                    if (data[idx + 3] > 0) {
+                        const screenX = (x + 0.5) * invQuality;
+                        const screenY = (y + 0.5) * invQuality;
+                        const mx = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
+                        const my = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
+                        crashMaskData[my * width + mx] = 255;
+                    }
+                }
+            }
+        }
+    }
+
     const out: CrackRaster = { data, width: canvasW, height: canvasH, quality, color: [24, 24, 24] };
+    if (crashMaskData) {
+        out.crashMask = {
+            data: crashMaskData,
+            width,
+            height,
+            minX,
+            minY,
+            quality: 1,
+        };
+    }
     if (attachDebugRegionRequested && debug_regionMap) {
         out.debugRegion = {
             map: debug_regionMap,

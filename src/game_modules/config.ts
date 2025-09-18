@@ -286,6 +286,7 @@ export const config = {
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
     // Crack mask debug/padding controls (UI-adjustable)
+    crashMaskEnabled: true,
     debugCrackMask: false,
     // Show FBM delimitations (separate toggle for fBm regions / buckets)
     showFbmDelimitations: false,
