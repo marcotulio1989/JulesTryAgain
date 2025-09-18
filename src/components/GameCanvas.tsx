@@ -40,9 +40,10 @@ interface GameCanvasPropsInternal extends GameCanvasProps {
     roadLaneTexture?: PIXI.Texture | null;
     roadLaneScale?: number;
     roadLaneAlpha?: number;
+    crashMaskEnabled?: boolean;
 }
 
-const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interiorTextureScale, interiorTextureAlpha, interiorTextureTint, crossfadeEnabled, crossfadeMs, roadCrackTexture, roadCrackScale, roadCrackAlpha, edgeTexture, edgeScale, edgeAlpha, roadLaneTexture, roadLaneScale, roadLaneAlpha }) => {
+const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interiorTextureScale, interiorTextureAlpha, interiorTextureTint, crossfadeEnabled, crossfadeMs, roadCrackTexture, roadCrackScale, roadCrackAlpha, edgeTexture, edgeScale, edgeAlpha, roadLaneTexture, roadLaneScale, roadLaneAlpha, crashMaskEnabled }) => {
     const canvasContainerRef = useRef<HTMLDivElement>(null);
     const pixiRenderer = useRef<PIXI.IRenderer<PIXI.ICanvas> | null>(null);
     const stage = useRef<PIXI.Container | null>(null);
@@ -91,6 +92,9 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     useEffect(() => {
         try { onMapChange(false); } catch (e) {}
     }, [roadCrackTexture, edgeTexture, roadCrackScale, roadCrackAlpha]);
+    useEffect(() => {
+        try { onMapChange(false); } catch (e) {}
+    }, [crashMaskEnabled]);
     useEffect(() => {
         try { roadLaneScaleRef.current = roadLaneScale; } catch (e) {}
     }, [roadLaneScale]);
@@ -195,6 +199,91 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         }
 
         return graphics;
+    };
+
+    const maskToGraphics = (
+        mask: Uint8Array | null,
+        maskWidth: number,
+        maskHeight: number,
+        spriteW: number,
+        spriteH: number,
+        color: number,
+        alpha: number
+    ): PIXI.Graphics | null => {
+        if (!mask || maskWidth <= 0 || maskHeight <= 0) return null;
+        const finalAlpha = Math.max(0, Math.min(1, alpha));
+        if (finalAlpha <= 0) return null;
+        const stepX = spriteW / maskWidth;
+        const stepY = spriteH / maskHeight;
+        const g = new PIXI.Graphics();
+        let drew = false;
+        for (let y = 0; y < maskHeight; y++) {
+            let runStart = -1;
+            for (let x = 0; x <= maskWidth; x++) {
+                const val = x < maskWidth ? mask[y * maskWidth + x] : 0;
+                if (val > 0) {
+                    if (runStart === -1) runStart = x;
+                } else if (runStart !== -1) {
+                    const runLen = x - runStart;
+                    if (runLen > 0) {
+                        g.beginFill(color, finalAlpha);
+                        g.drawRect(runStart * stepX, y * stepY, runLen * stepX, stepY);
+                        g.endFill();
+                        drew = true;
+                    }
+                    runStart = -1;
+                }
+            }
+        }
+        if (!drew) {
+            try { g.destroy(); } catch (e) {}
+            return null;
+        }
+        return g;
+    };
+
+    const buildPolygonMask = (
+        polygons: { x: number; y: number }[][],
+        width: number,
+        height: number,
+        minX: number,
+        minY: number
+    ): Uint8Array | null => {
+        if (!polygons.length || width <= 0 || height <= 0) return null;
+        const mask = new Uint8Array(width * height);
+        const prepared = polygons.map(poly => {
+            let pMinX = Infinity, pMaxX = -Infinity, pMinY = Infinity, pMaxY = -Infinity;
+            for (const v of poly) {
+                if (v.x < pMinX) pMinX = v.x;
+                if (v.x > pMaxX) pMaxX = v.x;
+                if (v.y < pMinY) pMinY = v.y;
+                if (v.y > pMaxY) pMaxY = v.y;
+            }
+            return {
+                bounds: { minX: pMinX, maxX: pMaxX, minY: pMinY, maxY: pMaxY },
+                polygon: { vertices: poly } as blockGeometry.Polygon,
+            };
+        });
+        for (const entry of prepared) {
+            const { minX: polyMinX, maxX: polyMaxX, minY: polyMinY, maxY: polyMaxY } = entry.bounds;
+            const startX = Math.max(0, Math.floor(polyMinX - minX));
+            const endX = Math.min(width - 1, Math.ceil(polyMaxX - minX));
+            const startY = Math.max(0, Math.floor(polyMinY - minY));
+            const endY = Math.min(height - 1, Math.ceil(polyMaxY - minY));
+            if (endX < startX || endY < startY) continue;
+            for (let y = startY; y <= endY; y++) {
+                const sampleY = minY + y + 0.5;
+                if (sampleY < polyMinY - 1e-3 || sampleY > polyMaxY + 1e-3) continue;
+                for (let x = startX; x <= endX; x++) {
+                    const sampleX = minX + x + 0.5;
+                    if (sampleX < polyMinX - 1e-3 || sampleX > polyMaxX + 1e-3) continue;
+                    if (blockGeometry.pointInPolygon({ x: sampleX, y: sampleY }, entry.polygon)) {
+                        mask[y * width + x] = 255;
+                    }
+                }
+            }
+        }
+        return mask;
     };
 
     // Stable node key generator: snap coordinates to a small grid before stringifying.
@@ -2057,6 +2146,18 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const spriteW = Math.max(4, Math.ceil(maxX - minX));
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
                     let cracksDisplay: PIXI.DisplayObject | null = null;
+                    let crashMaskDebugGraphics: PIXI.Graphics | null = null;
+                    const crashMaskActive = !!(renderCfg.crashMaskEnabled);
+                    const wantCrashMaskDebug = !!(renderCfg.debugCrackMask);
+                    const shouldBuildCrashMask = (crashMaskActive || wantCrashMaskDebug) && polys.length > 0;
+                    let polygonMask: Uint8Array | null = null;
+                    if (shouldBuildCrashMask) {
+                        try {
+                            polygonMask = buildPolygonMask(polys, spriteW, spriteH, minX, minY);
+                        } catch (e) {
+                            polygonMask = null;
+                        }
+                    }
 
                     if (useProceduralCracks) {
                         const raster = generateCrackRaster({
@@ -2066,6 +2167,8 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             minY,
                             renderConfig: renderCfg,
                             isoToWorld,
+                            debugMask: polygonMask ? { data: polygonMask, width: spriteW, height: spriteH } : undefined,
+                            captureCrashMask: crashMaskActive || wantCrashMaskDebug,
                         });
                         if (raster) {
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
@@ -2073,6 +2176,17 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             if (graphics) {
                                 cracksDisplay = graphics;
                                 proceduralCrackGraphicsRef.current = graphics;
+                                if (wantCrashMaskDebug && raster.crashMask) {
+                                    crashMaskDebugGraphics = maskToGraphics(
+                                        raster.crashMask.data,
+                                        raster.crashMask.width,
+                                        raster.crashMask.height,
+                                        spriteW,
+                                        spriteH,
+                                        0x00FFFF,
+                                        0.25
+                                    );
+                                }
                             }
                         }
                     }
@@ -2130,6 +2244,9 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         cracksDisplay.x = 0;
                         cracksDisplay.y = 0;
                         container.addChild(cracksDisplay);
+                        if (crashMaskDebugGraphics) {
+                            container.addChild(crashMaskDebugGraphics);
+                        }
                         container.addChild(maskG);
                         container.mask = maskG;
                         roadCrackOverlay.current?.addChild(container);
