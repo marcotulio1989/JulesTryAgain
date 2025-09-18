@@ -294,7 +294,9 @@ export const config = {
     // Pixel threshold to consider a polygon vertex 'touching' the bbox edge
     crackMaskTouchEps: 1.0,
     // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
-    crackUseNoise: false,
+    crackUseNoise: true,
+    // Generate road crack textures procedurally on each regenerate
+    crackAutoGenerate: true,
     // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
     // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
     // - octaves/lacunarity/gain: parâmetros de fBm.
@@ -313,7 +315,7 @@ export const config = {
         activeBucketStrategy: 'smallest'
     },
     // If true, bake cracks directly to a sprite applied to the map (no tiling sprite mask)
-    crackApplyDirect: false,
+    crackApplyDirect: true,
     // Mostrar apenas os contornos dos quarteirões (esconde ruas e preenchimento dos prédios)
     showOnlyBlockOutlines: false,
     // Mostrar apenas o interior dos quarteirões (preenchidos), escondendo ruas e demais elementos
