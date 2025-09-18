@@ -72,6 +72,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     const roadCrackTextureRef = useRef<PIXI.Texture | null>(roadCrackTexture || null);
     const edgeTextureRef = useRef<PIXI.Texture | null>(edgeTexture || null);
     const proceduralCrackGraphicsRef = useRef<PIXI.Graphics | null>(null);
+    const crashMaskDebugSpriteRef = useRef<PIXI.Sprite | null>(null);
     // Cache para evitar reconstruções pesadas dos marcadores/mascara quando nada mudou
     const laneMarkerCacheRef = useRef<{ key: string; container: PIXI.Container | null } | null>(null);
     const roadLaneScaleRef = useRef<number | undefined>(roadLaneScale);
@@ -1989,6 +1990,15 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 proceduralCrackGraphicsRef.current = null;
             }
             roadCrackDisplayRef.current = null;
+            if (crashMaskDebugSpriteRef.current) {
+                try {
+                    if (crashMaskDebugSpriteRef.current.parent) {
+                        crashMaskDebugSpriteRef.current.parent.removeChild(crashMaskDebugSpriteRef.current);
+                    }
+                    crashMaskDebugSpriteRef.current.destroy({ texture: true, baseTexture: true });
+                } catch (e) {}
+                crashMaskDebugSpriteRef.current = null;
+            }
             const renderCfg = (config as any).render || {};
             const useProceduralCracks = !!renderCfg.crackUseProcedural;
             const textureFromProps = roadCrackTextureRef.current;
@@ -2057,9 +2067,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const spriteW = Math.max(4, Math.ceil(maxX - minX));
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
                     let cracksDisplay: PIXI.DisplayObject | null = null;
+                    let crashRaster: CrackRaster | null = null;
 
                     if (useProceduralCracks) {
-                        const raster = generateCrackRaster({
+                        const rasterResult = generateCrackRaster({
                             width: spriteW,
                             height: spriteH,
                             minX,
@@ -2067,9 +2078,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             renderConfig: renderCfg,
                             isoToWorld,
                         });
-                        if (raster) {
+                        if (rasterResult) {
+                            crashRaster = rasterResult;
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
-                            const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
+                            const graphics = rasterToGraphics(rasterResult, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
                                 cracksDisplay = graphics;
                                 proceduralCrackGraphicsRef.current = graphics;
@@ -2133,6 +2145,33 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         container.addChild(maskG);
                         container.mask = maskG;
                         roadCrackOverlay.current?.addChild(container);
+
+                        if (renderCfg.debugCrackMask && crashRaster?.crashMask) {
+                            try {
+                                const maskInfo = crashRaster.crashMask;
+                                const maskData = maskInfo.data;
+                                const maskW = maskInfo.width;
+                                const maskH = maskInfo.height;
+                                if (maskData && maskW > 0 && maskH > 0) {
+                                    const rgba = new Uint8Array(maskW * maskH * 4);
+                                    for (let i = 0; i < maskData.length; i++) {
+                                        const a = maskData[i];
+                                        if (!a) continue;
+                                        const ii = i * 4;
+                                        rgba[ii] = 0;
+                                        rgba[ii + 1] = 229;
+                                        rgba[ii + 2] = 255;
+                                        rgba[ii + 3] = 120;
+                                    }
+                                    const tex = PIXI.Texture.fromBuffer(rgba, maskW, maskH);
+                                    const sprite = new PIXI.Sprite(tex);
+                                    sprite.x = maskInfo.minX;
+                                    sprite.y = maskInfo.minY;
+                                    crashMaskDebugSpriteRef.current = sprite;
+                                    roadCrackOverlay.current?.addChild(sprite);
+                                }
+                            } catch (e) {}
+                        }
 
                         if (cracksDisplay instanceof PIXI.TilingSprite || cracksDisplay instanceof PIXI.Sprite) {
                             roadCrackDisplayRef.current = cracksDisplay;
