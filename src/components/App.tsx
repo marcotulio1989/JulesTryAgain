@@ -43,6 +43,7 @@ const App: React.FC = () => {
 
     const regenerateMap = () => {
         const seed = new Date().getTime();
+        try { (config as any).render.crackSeed = seed; } catch (e) {}
         // Sempre permitir geração manual quando usuário clica
         MapActions.generate(seed);
         setUiTick(t => t + 1);
@@ -91,6 +92,14 @@ const App: React.FC = () => {
         setHwyW(highwayWidthM());
         setUiTick(t => t + 1);
     };
+    useEffect(() => {
+        try {
+            (config as any).render = (config as any).render || {};
+            if (!(config as any).render.crackSeed) {
+                (config as any).render.crackSeed = Date.now();
+            }
+        } catch (e) {}
+    }, []);
     // Ensure lane outlines visible by default when app mounts
     React.useEffect(() => {
         try { (config as any).render.showLaneOutlines = true; } catch (e) {}
@@ -746,7 +755,7 @@ const App: React.FC = () => {
                             <option value="largest">Largest regions</option>
                             <option value="random">Random</option>
                         </select>
-                        <button onClick={() => { setUiTick(t => t + 1); MapActions.generate(Date.now()); }} style={{ marginLeft: 8 }}>Regenerate Map</button>
+                        <span style={{ fontSize: 11, opacity: 0.75, marginLeft: 8 }}>Use o botão Regenerate ao lado para aplicar.</span>
                     </div>
                 </div>
                 {/* Painel para textura dos marcadores (será usada por cada retângulo de faixa) */}

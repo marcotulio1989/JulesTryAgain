@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useEffect as useReactEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import * as PIXI from 'pixi.js';
 import * as _ from 'lodash';
 import * as math from '../generic_modules/math';
@@ -16,6 +16,7 @@ import NoiseZoning from '../overlays/NoiseZoning';
 import { Noise } from 'noisejs';
 import { createGrassTexture } from '../overlays/grassTexture';
 import Quadtree from '../lib/quadtree';
+import { generateVoronoiCrackImage } from '../tools/crackGenerator';
 // ClipperLib (sem typings completos) - usar require para acessar classes
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ClipperLib: any = require('clipper-lib');
@@ -71,6 +72,8 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     const roadLaneTextureRef = useRef<PIXI.Texture | null>(roadLaneTexture || null);
     const roadCrackTextureRef = useRef<PIXI.Texture | null>(roadCrackTexture || null);
     const edgeTextureRef = useRef<PIXI.Texture | null>(edgeTexture || null);
+    const proceduralCrackTextureRef = useRef<PIXI.Texture | null>(null);
+    const proceduralCrackQualityRef = useRef<number>(1);
     // Cache para evitar reconstruções pesadas dos marcadores/mascara quando nada mudou
     const laneMarkerCacheRef = useRef<{ key: string; container: PIXI.Container | null } | null>(null);
     const roadLaneScaleRef = useRef<number | undefined>(roadLaneScale);
@@ -154,6 +157,181 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         const invC = -C / det;
         const invD = A / det;
         return { x: invA * p.x + invC * p.y, y: invB * p.x + invD * p.y };
+    };
+
+    const buildProceduralCrackTexture = (spriteW: number, spriteH: number, minX: number, minY: number) => {
+        if (typeof document === 'undefined') return null;
+        const renderCfg = (config as any).render || {};
+        const crackCfg = renderCfg.crackProceduralParams || {};
+        const fallbackQuality = (typeof crackCfg.quality === 'number' && isFinite(crackCfg.quality)) ? crackCfg.quality : ((typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1);
+        const minQuality = Math.max(0.1, Math.min(1, (typeof crackCfg.minQuality === 'number' && isFinite(crackCfg.minQuality)) ? crackCfg.minQuality : 0.25));
+        const clampQuality = (q: number) => Math.max(minQuality, Math.min(4, q || minQuality));
+        const maxCanvasDimension = Math.max(64, Math.min(8192, (typeof crackCfg.maxCanvasDimension === 'number' && isFinite(crackCfg.maxCanvasDimension)) ? crackCfg.maxCanvasDimension : 4096));
+        const maxCanvasPixels = Math.max(16384, Math.min(67108864, (typeof crackCfg.maxCanvasPixels === 'number' && isFinite(crackCfg.maxCanvasPixels)) ? crackCfg.maxCanvasPixels : 5_000_000));
+        let quality = clampQuality(fallbackQuality || 1);
+        let canvasW = Math.max(1, Math.round(spriteW * quality));
+        let canvasH = Math.max(1, Math.round(spriteH * quality));
+
+        const applyQualityReduction = (factor: number) => {
+            if (!(factor > 1)) return;
+            quality = clampQuality(quality / factor);
+            canvasW = Math.max(1, Math.round(spriteW * quality));
+            canvasH = Math.max(1, Math.round(spriteH * quality));
+        };
+
+        if (canvasW > maxCanvasDimension || canvasH > maxCanvasDimension) {
+            const factor = Math.max(canvasW / maxCanvasDimension, canvasH / maxCanvasDimension);
+            applyQualityReduction(factor);
+        }
+
+        if (canvasW * canvasH > maxCanvasPixels) {
+            const factor = Math.sqrt((canvasW * canvasH) / maxCanvasPixels);
+            applyQualityReduction(factor);
+        }
+
+        if (canvasW > maxCanvasDimension || canvasH > maxCanvasDimension || canvasW * canvasH > maxCanvasPixels) {
+            console.warn('[GameCanvas] Procedural crack texture skipped – area too large after clamping', { canvasW, canvasH, quality });
+            return null;
+        }
+        const seed = Math.floor((renderCfg.crackSeed ?? Date.now())) >>> 0;
+        const divisions = (typeof crackCfg.divisions === 'number' && crackCfg.divisions > 0) ? crackCfg.divisions : 400;
+        const thickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
+        const dilateRadius = (typeof crackCfg.dilateRadius === 'number' && crackCfg.dilateRadius >= 0) ? crackCfg.dilateRadius : 2;
+        const pixels = generateVoronoiCrackImage(canvasW, canvasH, {
+            divisions,
+            thickness,
+            dilateRadius,
+            seed,
+            scale: quality,
+            color: [24, 24, 24],
+        });
+        const data = pixels;
+
+        if ((config as any).render?.crackUseNoise) {
+            const noiseCfg = renderCfg.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3, crackBandWidth: 0.012, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
+            const baseScale = noiseCfg.baseScale || 1 / 480;
+            const octaves = noiseCfg.octaves || 4;
+            const lacunarity = noiseCfg.lacunarity || 2;
+            const gain = noiseCfg.gain || 0.5;
+            const buckets = Math.max(1, Math.min(8, noiseCfg.buckets || 3));
+            const crackBandWidth = Math.max(0.002, Math.min(0.1, noiseCfg.crackBandWidth || 0.012));
+            const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
+            const strategy = noiseCfg.activeBucketStrategy || 'smallest';
+            const regionSample = Math.max(16, Math.min(128, Math.floor(Math.min(spriteW, spriteH) / 6) || 16));
+            const regionW = Math.max(1, Math.floor(spriteW / regionSample));
+            const regionH = Math.max(1, Math.floor(spriteH / regionSample));
+            const regionNoise = new Noise(seed || 1);
+            const regionMap = new Uint8Array(regionW * regionH);
+            const counts = new Array<number>(buckets).fill(0);
+            for (let ry = 0; ry < regionH; ry++) {
+                for (let rx = 0; rx < regionW; rx++) {
+                    const sampleX = ((rx + 0.5) / regionW) * spriteW;
+                    const sampleY = ((ry + 0.5) / regionH) * spriteH;
+                    const screenPt = { x: sampleX + minX, y: sampleY + minY };
+                    const worldPt = isoToWorld(screenPt);
+                    const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                    let id = Math.floor(v * buckets);
+                    if (id < 0) id = 0;
+                    if (id >= buckets) id = buckets - 1;
+                    regionMap[ry * regionW + rx] = id;
+                    counts[id]++;
+                }
+            }
+
+            const stats = counts.map((c, i) => ({ i, c }));
+            let picked: { i: number; c: number }[] = [];
+            if (strategy === 'largest') {
+                picked = stats.slice().sort((a, b) => b.c - a.c).slice(0, maxActive);
+            } else if (strategy === 'random') {
+                const rng = (() => {
+                    let t = (seed ^ 0x9E3779B9) >>> 0;
+                    return () => { t = (t * 1664525 + 1013904223) >>> 0; return t / 0x100000000; };
+                })();
+                const arr = stats.slice();
+                for (let i = arr.length - 1; i > 0; i--) {
+                    const j = Math.floor(rng() * (i + 1));
+                    const tmp = arr[i];
+                    arr[i] = arr[j];
+                    arr[j] = tmp;
+                }
+                picked = arr.slice(0, maxActive);
+            } else {
+                picked = stats.slice().sort((a, b) => a.c - b.c).slice(0, maxActive);
+            }
+            const activeBuckets = new Set<number>(picked.map(p => p.i));
+            if (activeBuckets.size === 0) {
+                for (let b = 0; b < buckets; b++) activeBuckets.add(b);
+            }
+
+            const bucketNoise: Noise[] = new Array(buckets);
+            const bucketCenters: number[] = new Array(buckets);
+            const fineScales: number[] = new Array(buckets);
+            for (let b = 0; b < buckets; b++) {
+                bucketNoise[b] = new Noise(seed + b * 97 + 13);
+                bucketCenters[b] = (b + 0.5) / buckets;
+                fineScales[b] = baseScale * (1.5 + b * 0.6);
+            }
+
+            const invQuality = 1 / quality;
+            const regionCellW = regionW > 0 ? spriteW / regionW : spriteW;
+            const regionCellH = regionH > 0 ? spriteH / regionH : spriteH;
+            for (let y = 0; y < canvasH; y++) {
+                for (let x = 0; x < canvasW; x++) {
+                    const idx = (y * canvasW + x) * 4;
+                    const alpha = data[idx + 3];
+                    if (alpha === 0) continue;
+                    const screenX = (x + 0.5) * invQuality;
+                    const screenY = (y + 0.5) * invQuality;
+                    const rx = Math.max(0, Math.min(regionW - 1, Math.floor(screenX / (regionCellW || 1))));
+                    const ry = Math.max(0, Math.min(regionH - 1, Math.floor(screenY / (regionCellH || 1))));
+                    const bucketId = regionMap[ry * regionW + rx];
+                    if (!activeBuckets.has(bucketId)) {
+                        data[idx + 3] = 0;
+                        continue;
+                    }
+                    const noiseInst = bucketNoise[bucketId];
+                    const worldPt = isoToWorld({ x: screenX + minX, y: screenY + minY });
+                    const baseVal = fbmNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                    const dist = Math.abs(baseVal - bucketCenters[bucketId]);
+                    if (dist > crackBandWidth) {
+                        data[idx + 3] = 0;
+                        continue;
+                    }
+                    const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
+                    const edgeSoft = Math.pow(edge, 1.2);
+                    const fine = fbmNoise(noiseInst, worldPt.x * fineScales[bucketId] * 3.0, worldPt.y * fineScales[bucketId] * 3.0, 2, 2, 0.6);
+                    const modulation = Math.max(0, Math.min(1, edgeSoft * (0.35 + 0.65 * fine)));
+                    const newAlpha = Math.round(alpha * modulation);
+                    if (newAlpha < 12) {
+                        data[idx + 3] = 0;
+                    } else {
+                        data[idx + 3] = newAlpha;
+                        data[idx] = 24;
+                        data[idx + 1] = 24;
+                        data[idx + 2] = 24;
+                    }
+                }
+            }
+        } else {
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i + 3] > 0) {
+                    data[i] = 24;
+                    data[i + 1] = 24;
+                    data[i + 2] = 24;
+                }
+            }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = canvasW;
+        canvas.height = canvasH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+        const img = ctx.createImageData(canvasW, canvasH);
+        img.data.set(data);
+        ctx.putImageData(img, 0, 0);
+        const base = new PIXI.BaseTexture(canvas);
+        return { texture: new PIXI.Texture(base), quality };
     };
 
     // Stable node key generator: snap coordinates to a small grid before stringifying.
@@ -1941,17 +2119,16 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         // Desenhar camada secundária de vias (overlay) se habilitada
         drawSecondaryRoadLayer(segments);
         // Aplicar overlay de rachaduras nas vias se houver textura definida
-            try {
-            // clear existing crack sprite ref when removing children
+        try {
             try { roadCrackSpriteRef.current = null; } catch (e) {}
             roadCrackOverlay.current?.removeChildren();
-            try { console.debug('[GameCanvas] roadCrackTexture prop present=', !!roadCrackTextureRef.current, 'roadCrackOverlayChildrenBefore=', roadCrackOverlay.current?.children.length); } catch (e) {}
-            const useCrack = !!roadCrackTextureRef.current && !!(config as any).render.roadCrackUseTexture;
-            if (useCrack) {
-                // Combine all road polygons into a single mask graphics to reduce draw count.
-                // First collect all polygons and compute bounding box in screen (iso) coords,
-                // then draw the mask in container-local coordinates so the tiling sprite
-                // can be positioned at (0,0) inside the container and fully cover the mask.
+            const renderCfg = (config as any).render || {};
+            const useProceduralCracks = !!renderCfg.crackUseProcedural;
+            const textureFromProps = roadCrackTextureRef.current;
+            const allowTexture = !!renderCfg.roadCrackUseTexture;
+            const shouldRenderCracks = useProceduralCracks || (allowTexture && !!textureFromProps);
+            try { console.debug('[GameCanvas] crack overlay -> procedural=', useProceduralCracks, 'hasTexture=', !!textureFromProps, 'allowTexture=', allowTexture); } catch (e) {}
+            if (shouldRenderCracks) {
                 const polys: { x: number; y: number }[][] = [];
                 let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                 segments.forEach(segment => {
@@ -1961,10 +2138,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const vx0 = eW0.x - sW0.x; const vy0 = eW0.y - sW0.y; const len0 = Math.hypot(vx0, vy0) || 1;
                     const ux = vx0 / len0, uy = vy0 / len0;
                     const nx = -uy, ny = ux;
-                    const p1 = { x: sW0.x + nx * (w/2), y: sW0.y + ny * (w/2) };
-                    const p2 = { x: sW0.x - nx * (w/2), y: sW0.y - ny * (w/2) };
-                    const p3 = { x: eW0.x - nx * (w/2), y: eW0.y - ny * (w/2) };
-                    const p4 = { x: eW0.x + nx * (w/2), y: eW0.y + ny * (w/2) };
+                    const p1 = { x: sW0.x + nx * (w / 2), y: sW0.y + ny * (w / 2) };
+                    const p2 = { x: sW0.x - nx * (w / 2), y: sW0.y - ny * (w / 2) };
+                    const p3 = { x: eW0.x - nx * (w / 2), y: eW0.y - ny * (w / 2) };
+                    const p4 = { x: eW0.x + nx * (w / 2), y: eW0.y + ny * (w / 2) };
                     const poly = [p1, p2, p3, p4].map(pt => worldToIso(pt));
                     if (poly.length > 2) {
                         polys.push(poly);
@@ -1974,16 +2151,11 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         });
                     }
                 });
-                // Fillet sampling for mask removed: do not append intersection patch polygons
-                // to the crack mask here to avoid outlining diamond/cross debug shapes.
-                // Draw mask in local coordinates relative to minX/minY
                 if (isFinite(minX) && isFinite(minY) && maxX > minX && maxY > minY) {
-                    // Read thresholds/padding from config if present, otherwise use sensible defaults
                     const defaultPadding = ((config as any).render?.crackMaskPaddingDefault ?? 4) as number;
                     const extraPadding = ((config as any).render?.crackMaskPaddingExtra ?? 8) as number;
-                    const touchEps = ((config as any).render?.crackMaskTouchEps ?? 1.0) as number; // px threshold to consider 'touching'
-                    // Start with default padding to avoid subpixel holes
-                    let padding = Math.max(0, Math.floor(defaultPadding)); // px
+                    const touchEps = ((config as any).render?.crackMaskTouchEps ?? 1.0) as number;
+                    let padding = Math.max(0, Math.floor(defaultPadding));
                     let needExtra = false;
                     for (const p of polys) {
                         for (const v of p) {
@@ -1994,13 +2166,14 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         if (needExtra) break;
                     }
                     if (needExtra) {
-                        padding = Math.max(padding, Math.floor(extraPadding)); // increase padding when touching edges detected
+                        padding = Math.max(padding, Math.floor(extraPadding));
                         try { console.info('[GameCanvas] increased crack mask padding to', padding, 'touchEps=', touchEps); } catch (e) {}
                     }
                     minX = Math.floor(minX) - padding;
                     minY = Math.floor(minY) - padding;
                     maxX = Math.ceil(maxX) + padding;
                     maxY = Math.ceil(maxY) + padding;
+
                     const maskG = new PIXI.Graphics();
                     maskG.beginFill(0xFFFFFF);
                     for (const poly of polys) {
@@ -2013,230 +2186,115 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         maskG.closePath();
                     }
                     maskG.endFill();
-                    const tex = roadCrackTextureRef.current || PIXI.Texture.WHITE;
-                    // ensure wrap mode on base texture so scaling/repeat works
-                    try {
-                        const bt = (tex as any).baseTexture;
-                        if (bt) {
-                            const applyWrap = () => {
-                                try { bt.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch (e) {}
-                                try {
-                                    const sv = (typeof roadCrackScale === 'number' && isFinite(roadCrackScale)) ? Math.max(1e-6, roadCrackScale) : 1.0;
-                                    if (roadCrackSpriteRef.current && (roadCrackSpriteRef.current as any) instanceof PIXI.TilingSprite && (roadCrackSpriteRef.current as any).tileScale) (roadCrackSpriteRef.current as any).tileScale.set(sv, sv);
-                                } catch (e) {}
-                            };
-                            if (!bt.valid && typeof bt.on === 'function') {
-                                try { bt.on('update', applyWrap); } catch (e) { applyWrap(); }
-                            } else {
-                                applyWrap();
-                            }
-                        }
-                    } catch (e) {}
+
                     const spriteW = Math.max(4, Math.ceil(maxX - minX));
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
-                    // If noise-driven cracks are enabled, composite the crack texture with a noise mask
-                    let finalTexture: PIXI.Texture = tex;
-                    const useNoise = !!((config as any).render.crackUseNoise);
-                    const applyDirect = !!((config as any).render.crackApplyDirect);
-                    if (useNoise && typeof document !== 'undefined') {
-                        try {
-                            // Gerar rachaduras apenas em áreas delimitadas pelo ruído.
-                            const noiseCfg = (config as any).render.crackNoiseParams || { baseScale: 1/480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3, bucketBand: 0.08, crackBandWidth: 0.008, maxActiveBuckets: 2 };
-                            const seedBase = Math.floor(Math.random() * 10000);
-                            const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
-                            const nW = Math.max(1, Math.ceil(spriteW * dpr));
-                            const nH = Math.max(1, Math.ceil(spriteH * dpr));
-                            const regionRes = Math.max(64, Math.min(256, Math.floor(Math.min(nW, nH) / 8)));
-                            const regionW = Math.max(1, Math.floor(nW / regionRes));
-                            const regionH = Math.max(1, Math.floor(nH / regionRes));
-                            const regionNoise = new Noise(seedBase);
-                            const baseScale = noiseCfg.baseScale || 1/240;
-                            const octaves = noiseCfg.octaves || 4;
-                            const lacunarity = noiseCfg.lacunarity || 2;
-                            const gain = noiseCfg.gain || 0.5;
-                            const buckets = Math.max(1, Math.min(8, noiseCfg.buckets || 3));
-                            const bucketBand = Math.max(0.01, Math.min(0.5, noiseCfg.bucketBand || 0.08));
-                            const crackBandWidth = Math.max(0.002, Math.min(0.1, noiseCfg.crackBandWidth || 0.012));
-
-                            // 1) construir mapa de regiões (quantizado)
-                            const regionMap: Uint8Array = new Uint8Array(regionW * regionH);
-                            let minV = 1, maxV = 0;
-                            for (let ry = 0; ry < regionH; ry++) {
-                                for (let rx = 0; rx < regionW; rx++) {
-                                    const px = Math.floor((rx + 0.5) * (nW / regionW) / dpr);
-                                    const py = Math.floor((ry + 0.5) * (nH / regionH) / dpr);
-                                    const sx = (px / dpr);
-                                    const sy = (py / dpr);
-                                    const screenPt = { x: sx + minX, y: sy + minY };
-                                    const worldPt = isoToWorld(screenPt);
-                                    const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
-                                    if (v < minV) minV = v;
-                                    if (v > maxV) maxV = v;
-                                    let id = Math.floor(v * buckets);
-                                    if (id < 0) id = 0; if (id >= buckets) id = buckets - 1;
-                                    regionMap[ry * regionW + rx] = id;
-                                }
+                    let textureToUse: PIXI.Texture | null = null;
+                    if (useProceduralCracks) {
+                        const procedural = buildProceduralCrackTexture(spriteW, spriteH, minX, minY);
+                        if (procedural && procedural.texture) {
+                            const prev = proceduralCrackTextureRef.current;
+                            if (prev && prev !== procedural.texture) {
+                                try { prev.destroy(true); } catch (e) {}
                             }
-                            // 2) Para cada bucket, gerar uma textura procedural de rachadura (canvas)
-                            const bucketAlphas: Uint8ClampedArray[] = [];
-                            let totalCrackPixels = 0;
-                            for (let b = 0; b < buckets; b++) {
-                                const s = seedBase + b * 97 + 13;
-                                const n = new Noise(s);
-                                const ctxTemp = document.createElement('canvas').getContext('2d');
-                                const imgB = (ctxTemp ? ctxTemp.createImageData(nW, nH) : null);
-                                const bucketCenter = (b + 0.5) / buckets;
-                                const fineScale = baseScale * (1.5 + b * 0.6);
-                                let bucketCrackPixels = 0;
-                                if (imgB) {
-                                    for (let y = 0; y < nH; y++) {
-                                        for (let x = 0; x < nW; x++) {
-                                            const sx = (x / dpr);
-                                            const sy = (y / dpr);
-                                            const screenPt = { x: sx + minX, y: sy + minY };
-                                            const worldPt = isoToWorld(screenPt);
-                                            const v = fbmNoise(n, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
-                                            const dist = Math.abs(v - bucketCenter);
-                                            const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
-                                            const edgeSoft = Math.pow(edge, 1.2);
-                                            const fine = fbmNoise(n, worldPt.x * fineScale * 3.0, worldPt.y * fineScale * 3.0, 2, 2, 0.6);
-                                            const alpha = Math.round(255 * Math.max(0, Math.min(1, edgeSoft * (0.35 + 0.65 * fine))));
-                                            if (alpha > 32) bucketCrackPixels++;
-                                            const idx = (y * nW + x) * 4;
-                                            imgB.data[idx] = 24; imgB.data[idx + 1] = 24; imgB.data[idx + 2] = 24; imgB.data[idx + 3] = alpha;
-                                        }
-                                    }
-                                    bucketAlphas.push(new Uint8ClampedArray(imgB.data));
-                                } else {
-                                    bucketAlphas.push(new Uint8ClampedArray(nW * nH * 4));
-                                }
-                                totalCrackPixels += bucketCrackPixels;
-                                if (window && window.console) {
-                                    console.log(`[CrackDebug] Bucket ${b}: crack pixels >32 alpha =`, bucketCrackPixels);
-                                }
-                            }
-
-                            // Decide quais buckets estarão ativos: escolher os top-N buckets por cobertura
-                            const counts = new Array(buckets).fill(0);
-                            for (let i = 0; i < regionMap.length; i++) counts[regionMap[i]]++;
-                            const bucketStats = counts.map((c, i) => ({ i, c }));
-                            const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
-                            const strategy = (noiseCfg.activeBucketStrategy || 'smallest');
-                            let picked: { i: number; c: number }[] = [];
-                            if (strategy === 'largest') {
-                                picked = bucketStats.slice().sort((a, b) => b.c - a.c).slice(0, maxActive);
-                            } else if (strategy === 'random') {
-                                const arr = bucketStats.slice();
-                                for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
-                                picked = arr.slice(0, maxActive);
-                            } else {
-                                picked = bucketStats.slice().sort((a, b) => a.c - b.c).slice(0, maxActive);
-                            }
-                            const activeBuckets = new Set<number>(picked.map(p => p.i));
-
-                            // 3) Compor final: para cada pixel do canvas final, pegar o bucket de regionMap e copiar alpha do bucket ativo
-                            const crackCanvas = document.createElement('canvas');
-                            crackCanvas.width = nW; crackCanvas.height = nH;
-                            const cCtx = crackCanvas.getContext('2d');
-                            let finalCrackPixels = 0;
-                            if (cCtx) {
-                                const out = cCtx.createImageData(nW, nH);
-                                for (let y = 0; y < nH; y++) {
-                                    for (let x = 0; x < nW; x++) {
-                                        const rxF = (x / nW) * regionW; const ryF = (y / nH) * regionH;
-                                        const rx0 = Math.max(0, Math.min(regionW - 1, Math.floor(rxF)));
-                                        const ry0 = Math.max(0, Math.min(regionH - 1, Math.floor(ryF)));
-                                        const id = regionMap[ry0 * regionW + rx0];
-                                        let a = 0;
-                                        if (activeBuckets.has(id)) {
-                                            const buf = bucketAlphas[id];
-                                            const idx = (y * nW + x) * 4;
-                                            a = buf ? buf[idx + 3] : 0;
-                                        }
-                                        if (a > 32) finalCrackPixels++;
-                                        const idxOut = (y * nW + x) * 4;
-                                        out.data[idxOut] = 24; out.data[idxOut + 1] = 24; out.data[idxOut + 2] = 24; out.data[idxOut + 3] = a;
-                                    }
-                                }
-                                cCtx.putImageData(out, 0, 0);
-                                const finalBase = new PIXI.BaseTexture(crackCanvas);
-                                try { (finalBase as any).wrapMode = (PIXI as any).WRAP_MODES?.REPEAT ?? (PIXI as any).WRAP_MODES; } catch (e) {}
-                                finalTexture = new PIXI.Texture(finalBase);
-                            }
-                            if (window && window.console) {
-                                console.log('[CrackDebug] regionMap:', { regionW, regionH, buckets, minV, maxV, counts });
-                                console.log('[CrackDebug] picked activeBuckets:', Array.from(activeBuckets));
-                                console.log('[CrackDebug] totalCrackPixels (all buckets):', totalCrackPixels, 'finalCrackPixels (composed):', finalCrackPixels);
-                            }
-                        } catch (e) {
-                            console.warn('[GameCanvas] procedural crack generation failed', e);
+                            proceduralCrackTextureRef.current = procedural.texture;
+                            proceduralCrackQualityRef.current = procedural.quality;
+                            textureToUse = procedural.texture;
+                        } else {
+                            proceduralCrackTextureRef.current = null;
+                            proceduralCrackQualityRef.current = 1;
                         }
                     }
+                    if (!textureToUse && textureFromProps) {
+                        textureToUse = textureFromProps;
+                        proceduralCrackTextureRef.current = null;
+                        proceduralCrackQualityRef.current = 1;
+                    }
 
-                    // If applying directly, create a Sprite. Otherwise use a TilingSprite as before.
-                    const sprite = applyDirect ? new PIXI.Sprite(finalTexture) : new PIXI.TilingSprite(finalTexture, spriteW, spriteH);
-                    // keep a ref so external prop changes can update tileScale/alpha in-place
-                    try { roadCrackSpriteRef.current = sprite; } catch (e) {}
-                    // apply scale safely (only for TilingSprite)
-                    try {
-                        const scaleVal = (typeof roadCrackScale === 'number' && isFinite(roadCrackScale)) ? Math.max(0.000001, roadCrackScale) : 1.0;
-                        if ((sprite as any) instanceof PIXI.TilingSprite && (sprite as any).tileScale) {
-                            try { (sprite as any).tileScale.set(scaleVal, scaleVal); } catch (e) {}
-                        }
-                        try { console.debug('[GameCanvas] roadCrack tileScale set to', scaleVal); } catch (e) {}
-                    } catch (e) {}
-                    // Apply tileTransform only for TilingSprite
-                    try {
-                        const rCfg = (config as any).render || {};
-                        const isoA = typeof rCfg.isoA === 'number' ? rCfg.isoA : 1;
-                        const isoB = typeof rCfg.isoB === 'number' ? rCfg.isoB : 0;
-                        const isoC = typeof rCfg.isoC === 'number' ? rCfg.isoC : 0;
-                        const isoD = typeof rCfg.isoD === 'number' ? rCfg.isoD : 1;
-                        if ((sprite as any) instanceof PIXI.TilingSprite && (sprite as any).tileTransform) {
+                    if (textureToUse) {
+                        try {
+                            const bt = (textureToUse as any).baseTexture;
+                            if (bt) {
+                                const applyWrap = () => {
+                                    try { bt.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch (e) {}
+                                    try {
+                                        const sv = (typeof roadCrackScale === 'number' && isFinite(roadCrackScale)) ? Math.max(1e-6, roadCrackScale) : 1.0;
+                                        if (roadCrackSpriteRef.current && (roadCrackSpriteRef.current as any) instanceof PIXI.TilingSprite && (roadCrackSpriteRef.current as any).tileScale) (roadCrackSpriteRef.current as any).tileScale.set(sv, sv);
+                                    } catch (e) {}
+                                };
+                                if (!bt.valid && typeof bt.on === 'function') {
+                                    try { bt.on('update', applyWrap); } catch (e) { applyWrap(); }
+                                } else {
+                                    applyWrap();
+                                }
+                            }
+                        } catch (e) {}
+
+                        const useDirectSprite = useProceduralCracks || !!renderCfg.crackApplyDirect;
+                        const sprite = useDirectSprite ? new PIXI.Sprite(textureToUse) : new PIXI.TilingSprite(textureToUse, spriteW, spriteH);
+                        if (useDirectSprite) {
+                            (sprite as PIXI.Sprite).width = spriteW;
+                            (sprite as PIXI.Sprite).height = spriteH;
+                        } else {
                             try {
-                                (sprite as any).tileTransform.a = isoA;
-                                (sprite as any).tileTransform.b = isoB;
-                                (sprite as any).tileTransform.c = isoC;
-                                (sprite as any).tileTransform.d = isoD;
-                                (sprite as any).tileTransform.tx = 0;
-                                (sprite as any).tileTransform.ty = 0;
+                                const scaleVal = (typeof roadCrackScale === 'number' && isFinite(roadCrackScale)) ? Math.max(0.000001, roadCrackScale) : 1.0;
+                                (sprite as any).tileScale?.set(scaleVal, scaleVal);
+                                try { console.debug('[GameCanvas] roadCrack tileScale set to', scaleVal); } catch (e) {}
                             } catch (e) {}
                         }
-                    } catch (e) {}
-                    sprite.alpha = (typeof roadCrackAlpha === 'number') ? roadCrackAlpha : 0.6;
-                    // Sprite drawn in container-local coords so place it at (0,0)
-                    sprite.x = 0; sprite.y = 0;
-                    const container = new PIXI.Container();
-                    // Position container at the bounding box origin so local mask coords align
-                    container.x = minX; container.y = minY;
-                    container.addChild(sprite);
-                    container.addChild(maskG);
-                    container.mask = maskG;
-                    roadCrackOverlay.current?.addChild(container);
-                    // Debug overlay: draw polygon outlines and bbox if requested
-                    try {
-                        if ((config as any).render && (config as any).render.debugCrackMask) {
-                            const debugG = new PIXI.Graphics();
-                            // bbox (blue)
-                            debugG.lineStyle(2, 0x0000FF, 0.8);
-                            debugG.drawRect(minX, minY, maxX - minX, maxY - minY);
-                            // mask polygons (red), draw in world coords for clarity
-                            debugG.lineStyle(1, 0xFF0000, 0.9);
-                            for (const poly of polys) {
-                                debugG.moveTo(poly[0].x, poly[0].y);
-                                for (let i = 1; i < poly.length; i++) debugG.lineTo(poly[i].x, poly[i].y);
-                                debugG.closePath();
-                            }
-                            // If we auto-increased padding, show a small green marker at the top-left
-                            if (padding > 4) {
-                                debugG.beginFill(0x00FF00, 0.9);
-                                debugG.drawCircle(minX + 6, minY + 6, 4);
-                                debugG.endFill();
-                            }
-                            roadCrackOverlay.current?.addChild(debugG);
+                        try { roadCrackSpriteRef.current = sprite as any; } catch (e) {}
+
+                        if (!useDirectSprite) {
+                            try {
+                                const isoA = typeof renderCfg.isoA === 'number' ? renderCfg.isoA : 1;
+                                const isoB = typeof renderCfg.isoB === 'number' ? renderCfg.isoB : 0;
+                                const isoC = typeof renderCfg.isoC === 'number' ? renderCfg.isoC : 0;
+                                const isoD = typeof renderCfg.isoD === 'number' ? renderCfg.isoD : 1;
+                                if ((sprite as any) instanceof PIXI.TilingSprite && (sprite as any).tileTransform) {
+                                    (sprite as any).tileTransform.a = isoA;
+                                    (sprite as any).tileTransform.b = isoB;
+                                    (sprite as any).tileTransform.c = isoC;
+                                    (sprite as any).tileTransform.d = isoD;
+                                    (sprite as any).tileTransform.tx = 0;
+                                    (sprite as any).tileTransform.ty = 0;
+                                }
+                            } catch (e) {}
                         }
-                    } catch (e) {}
-                    try { console.debug('[GameCanvas] roadCrackOverlay added container, childrenNow=', roadCrackOverlay.current?.children.length); } catch (e) {}
+
+                        sprite.alpha = (typeof roadCrackAlpha === 'number') ? roadCrackAlpha : 0.6;
+                        sprite.x = 0;
+                        sprite.y = 0;
+
+                        const container = new PIXI.Container();
+                        container.x = minX;
+                        container.y = minY;
+                        container.addChild(sprite);
+                        container.addChild(maskG);
+                        container.mask = maskG;
+                        roadCrackOverlay.current?.addChild(container);
+
+                        try {
+                            if (renderCfg.debugCrackMask) {
+                                const debugG = new PIXI.Graphics();
+                                debugG.lineStyle(2, 0x0000FF, 0.8);
+                                debugG.drawRect(minX, minY, maxX - minX, maxY - minY);
+                                debugG.lineStyle(1, 0xFF0000, 0.9);
+                                for (const poly of polys) {
+                                    debugG.moveTo(poly[0].x, poly[0].y);
+                                    for (let i = 1; i < poly.length; i++) debugG.lineTo(poly[i].x, poly[i].y);
+                                    debugG.closePath();
+                                }
+                                if (padding > 4) {
+                                    debugG.beginFill(0x00FF00, 0.9);
+                                    debugG.drawCircle(minX + 6, minY + 6, 4);
+                                    debugG.endFill();
+                                }
+                                roadCrackOverlay.current?.addChild(debugG);
+                            }
+                        } catch (e) {}
+
+                        try { console.debug('[GameCanvas] roadCrackOverlay added container, childrenNow=', roadCrackOverlay.current?.children.length); } catch (e) {}
+                    }
                 }
             }
         } catch (e) {
@@ -3449,6 +3507,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
             pixiRenderer.current?.destroy();
             canvasContainerRef.current?.removeChild(canvasEl);
             if (NoiseZoning.detach) NoiseZoning.detach();
+            if (proceduralCrackTextureRef.current) {
+                try { proceduralCrackTextureRef.current.destroy(true); } catch (e) {}
+                proceduralCrackTextureRef.current = null;
+            }
         };
     }, []);
 
