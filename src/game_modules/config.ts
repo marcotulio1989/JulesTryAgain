@@ -293,8 +293,16 @@ export const config = {
     crackMaskPaddingExtra: 8,
     // Pixel threshold to consider a polygon vertex 'touching' the bbox edge
     crackMaskTouchEps: 1.0,
+    // Use procedural cracks baked via Voronoi preview logic by default
+    crackUseProcedural: true,
+    crackProceduralParams: {
+        divisions: 400,
+        thickness: 6,
+        dilateRadius: 2,
+        quality: 2,
+    },
     // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
-    crackUseNoise: false,
+    crackUseNoise: true,
     // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
     // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
     // - octaves/lacunarity/gain: parâmetros de fBm.
@@ -312,8 +320,6 @@ export const config = {
         // Escolha de quais buckets são ativados: 'smallest' (regiões menores), 'largest', 'random'
         activeBucketStrategy: 'smallest'
     },
-    // If true, bake cracks directly to a sprite applied to the map (no tiling sprite mask)
-    crackApplyDirect: false,
     // Mostrar apenas os contornos dos quarteirões (esconde ruas e preenchimento dos prédios)
     showOnlyBlockOutlines: false,
     // Mostrar apenas o interior dos quarteirões (preenchidos), escondendo ruas e demais elementos
