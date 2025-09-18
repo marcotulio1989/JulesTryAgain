@@ -444,7 +444,9 @@ const App: React.FC = () => {
             <GameCanvas interiorTexture={interiorTexture} interiorTextureScale={texScale} interiorTextureAlpha={texAlpha} interiorTextureTint={parseInt(texTint.slice(1),16)} crossfadeEnabled={crossfadeEnabled} crossfadeMs={crossfadeMs}
                 roadCrackTexture={roadCrackTexture} roadCrackScale={crackScale} roadCrackAlpha={crackAlpha}
                 edgeTexture={edgeTexture} edgeScale={edgeScale} edgeAlpha={edgeAlpha}
-                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha} />
+                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha}
+                crashMaskEnabled={crashMaskEnabled}
+            />
             <div id="control-bar" className={controlsCollapsed ? 'collapsed' : ''}>
                 <button id="control-bar-toggle" onClick={() => setControlsCollapsed(c => !c)} style={{ marginRight: 8 }}>
                     {controlsCollapsed ? 'Expandir' : 'Colapsar'}
