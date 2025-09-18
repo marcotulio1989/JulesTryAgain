@@ -173,6 +173,14 @@ export interface CrackRaster {
         minY: number;
         quality: number;
     };
+    crashMask?: {
+        data: Uint8Array;
+        width: number;
+        height: number;
+        minX: number;
+        minY: number;
+        quality: number;
+    };
 }
 
 export interface CrackRasterOptions {
@@ -182,10 +190,23 @@ export interface CrackRasterOptions {
     minY: number;
     renderConfig: any;
     isoToWorld: (point: { x: number; y: number }) => { x: number; y: number };
+    debugMask?: { data: Uint8Array; width: number; height: number };
+    captureCrashMask?: boolean;
 }
 
 export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | null {
-    const { width, height, minX, minY, renderConfig, isoToWorld } = options;
+    const {
+        width: widthRaw,
+        height: heightRaw,
+        minX,
+        minY,
+        renderConfig,
+        isoToWorld,
+        debugMask,
+        captureCrashMask,
+    } = options;
+    const width = Math.max(1, Math.round(widthRaw));
+    const height = Math.max(1, Math.round(heightRaw));
     const crackCfg = renderConfig?.crackProceduralParams || {};
     const fallbackQuality = (typeof crackCfg.quality === 'number' && isFinite(crackCfg.quality))
         ? crackCfg.quality
@@ -301,6 +322,35 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_regionCellH = 0;
     let debug_buckets = 0;
     const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
+    let debugMaskData: Uint8Array | null = null;
+    if (debugMask && debugMask.data) {
+        if (debugMask.width === width && debugMask.height === height) {
+            debugMaskData = debugMask.data;
+        } else if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[crackGenerator] Ignoring debugMask due to dimension mismatch', {
+                expected: { width, height }, provided: { width: debugMask.width, height: debugMask.height }
+            });
+        }
+    }
+    const captureCrashMaskActual = !!(captureCrashMask && debugMaskData);
+    const crashMaskData = captureCrashMaskActual ? new Uint8Array(width * height) : null;
+    const populateCrashMask = (sourceMask: Uint8Array | null) => {
+        if (!crashMaskData) return;
+        const len = crashMaskData.length;
+        if (!debugMaskData) {
+            crashMaskData.fill(0);
+            return;
+        }
+        if (sourceMask && sourceMask.length === len) {
+            for (let i = 0; i < len; i++) {
+                crashMaskData[i] = (sourceMask[i] !== 0 && debugMaskData[i] !== 0) ? 255 : 0;
+            }
+        } else {
+            for (let i = 0; i < len; i++) {
+                crashMaskData[i] = debugMaskData[i] !== 0 ? 255 : 0;
+            }
+        }
+    };
 
     if (renderConfig?.crackUseNoise) {
         const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3, crackBandWidth: 0.012, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
@@ -384,7 +434,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             }
         }
 
-    const bucketNoise: Noise[] = new Array(buckets);
+        const bucketNoise: Noise[] = new Array(buckets);
         const bucketCenters: number[] = new Array(buckets);
         const fineScales: number[] = new Array(buckets);
         for (let b = 0; b < buckets; b++) {
@@ -393,10 +443,10 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             fineScales[b] = baseScale * (1.5 + b * 0.6);
         }
 
-    const invQuality = 1 / quality;
-    debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
-    debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
-    debug_buckets = buckets;
+        const invQuality = 1 / quality;
+        debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
+        debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
+        debug_buckets = buckets;
         // Pre-generate an FBM mask at the original render resolution (width x height)
         // and sample it per-canvas pixel. This avoids subtle coordinate mismatches
         // between canvas-res sampling and the coarse region map used below.
@@ -423,6 +473,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             // If mask generation fails, fall back to no mask (null)
             fbmMaskFull = null;
         }
+        populateCrashMask(fbmMaskFull);
 
         for (let y = 0; y < canvasH; y++) {
             for (let x = 0; x < canvasW; x++) {
@@ -431,16 +482,21 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 if (alpha === 0) continue;
                 const screenX = (x + 0.5) * invQuality;
                 const screenY = (y + 0.5) * invQuality;
+                const baseX = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
+                const baseY = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
+                const baseIndex = baseY * width + baseX;
                 // If we have a full-resolution FBM mask, sample it in screen coords
                 // (mask was generated at original `width`/`height`). If mask says
                 // 'blocked', clear alpha and skip per-bucket checks.
                 if (fbmMaskFull) {
-                    const mx = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
-                    const my = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
-                    if (fbmMaskFull[my * width + mx] === 0) {
+                    if (fbmMaskFull[baseIndex] === 0) {
                         data[idx + 3] = 0;
                         continue;
                     }
+                }
+                if (debugMaskData && debugMaskData[baseIndex] === 0) {
+                    data[idx + 3] = 0;
+                    continue;
                 }
                 const rx = Math.max(0, Math.min(debug_regionW - 1, Math.floor(screenX / (debug_regionCellW || 1))));
                 const ry = Math.max(0, Math.min(debug_regionH - 1, Math.floor(screenY / (debug_regionCellH || 1))));
@@ -500,11 +556,22 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             data.set(_voronoiCopy);
         }
     } else {
-        for (let i = 0; i < data.length; i += 4) {
-            if (data[i + 3] > 0) {
-                data[i] = 24;
-                data[i + 1] = 24;
-                data[i + 2] = 24;
+        const invQuality = 1 / quality;
+        for (let y = 0; y < canvasH; y++) {
+            for (let x = 0; x < canvasW; x++) {
+                const idx = (y * canvasW + x) * 4;
+                if (data[idx + 3] === 0) continue;
+                data[idx] = 24;
+                data[idx + 1] = 24;
+                data[idx + 2] = 24;
+                if (!crashMaskData) continue;
+                const screenX = (x + 0.5) * invQuality;
+                const screenY = (y + 0.5) * invQuality;
+                const baseX = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
+                const baseY = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
+                const baseIndex = baseY * width + baseX;
+                if (debugMaskData && debugMaskData[baseIndex] === 0) continue;
+                crashMaskData[baseY * width + baseX] = 255;
             }
         }
     }
@@ -518,6 +585,16 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             buckets: debug_buckets,
             cellW: debug_regionCellW,
             cellH: debug_regionCellH,
+            minX,
+            minY,
+            quality,
+        };
+    }
+    if (crashMaskData) {
+        out.crashMask = {
+            data: crashMaskData,
+            width,
+            height,
             minX,
             minY,
             quality,
