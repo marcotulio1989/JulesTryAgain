@@ -189,20 +189,48 @@ const App: React.FC = () => {
         try { const v = localStorage.getItem('crashMaskEnabled'); if (v !== null) return v === 'true'; } catch (e) {}
         return !!(config as any).render.crashMaskEnabled;
     });
-    const [cnBaseScale, setCnBaseScale] = useState<number>(() => safeLoadNumber('crack.baseScale', (config as any).render.crackNoiseParams?.baseScale || 1 / 480));
-    const [cnOctaves, setCnOctaves] = useState<number>(() => safeLoadNumber('crack.octaves', (config as any).render.crackNoiseParams?.octaves || 4));
-    const [cnLacunarity, setCnLacunarity] = useState<number>(() => safeLoadNumber('crack.lacunarity', (config as any).render.crackNoiseParams?.lacunarity || 2.0));
-    const [cnGain, setCnGain] = useState<number>(() => safeLoadNumber('crack.gain', (config as any).render.crackNoiseParams?.gain || 0.5));
-    const [cnBuckets, setCnBuckets] = useState<number>(() => safeLoadNumber('crack.buckets', (config as any).render.crackNoiseParams?.buckets || 3));
-    const [cnCrackBandWidth, setCnCrackBandWidth] = useState<number>(() => safeLoadNumber('crack.crackBandWidth', (config as any).render.crackNoiseParams?.crackBandWidth || 0.008));
-    const [cnMaxActiveBuckets, setCnMaxActiveBuckets] = useState<number>(() => safeLoadNumber('crack.maxActiveBuckets', (config as any).render.crackNoiseParams?.maxActiveBuckets || 2));
-    const [cnActiveStrategy, setCnActiveStrategy] = useState<string>(() => (config as any).render.crackNoiseParams?.activeBucketStrategy || 'smallest');
+    const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+    const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+    const CRACK_AREA_BUCKETS = 5;
+    const CRACK_AREA_MIN_BAND = 0.003;
+    const CRACK_AREA_MAX_BAND = 0.028;
+    const CRACK_AREA_MIN_BASE = 1 / 760;
+    const CRACK_AREA_MAX_BASE = 1 / 260;
+    const loadStoredAreaLevel = () => {
+        try {
+            const raw = localStorage.getItem('crack.areaLevel');
+            if (raw !== null) {
+                const parsed = parseFloat(raw);
+                if (isFinite(parsed)) return clamp(parsed, 0, 100);
+            }
+        } catch (e) {}
+        const params = (config as any).render?.crackNoiseParams;
+        if (params && typeof params.crackBandWidth === 'number' && isFinite(params.crackBandWidth)) {
+            const normalized = clamp((params.crackBandWidth - CRACK_AREA_MIN_BAND) / (CRACK_AREA_MAX_BAND - CRACK_AREA_MIN_BAND), 0, 1);
+            return Math.round(normalized * 100);
+        }
+        return 55;
+    };
+    const [crackAreaLevel, setCrackAreaLevel] = useState<number>(() => loadStoredAreaLevel());
+    const updateCrackAreaLevel = (next: number, opts?: { forceRegenerate?: boolean }) => {
+        const clamped = clamp(Math.round(next), 0, 100);
+        if (clamped === crackAreaLevel) {
+            if (opts?.forceRegenerate && crackUseNoise) {
+                try { MapActions.generate((config as any).render?.crackSeed || Date.now()); } catch (e) {}
+            }
+            return;
+        }
+        setCrackAreaLevel(clamped);
+    };
     const [edgeScale, setEdgeScale] = useState<number>(() => safeLoadNumber('edgeScale', (config as any).render.edgeTextureScale || 1.0));
     const [edgeAlpha, setEdgeAlpha] = useState<number>(() => safeLoadNumber('edgeAlpha', (config as any).render.edgeTextureAlpha ?? 1.0));
     // controls for road lane overlay
     const [laneTexture, setLaneTexture] = useState<PIXI.Texture | null>(null);
     const [laneScale, setLaneScale] = useState<number>(() => safeLoadNumber('roadLaneScale', (config as any).render.roadLaneTextureScale || 1.0));
     const [laneAlpha, setLaneAlpha] = useState<number>(() => safeLoadNumber('roadLaneAlpha', (config as any).render.roadLaneTextureAlpha ?? 1.0));
+    const crackAreaNormalized = clamp((crackAreaLevel || 0) / 100, 0, 1);
+    const crackAreaActiveBuckets = Math.max(1, Math.round(1 + crackAreaNormalized * (CRACK_AREA_BUCKETS - 1)));
+    const crackAreaBandFraction = lerp(CRACK_AREA_MIN_BAND, CRACK_AREA_MAX_BAND, crackAreaNormalized);
 
     const handleTextureLoad = (tex: PIXI.Texture, url: string) => {
         // Destroy previous texture (if any) to avoid stale resources
@@ -306,30 +334,36 @@ const App: React.FC = () => {
         setUiTick(t => t + 1);
     }, [crackUseNoise]);
 
+    const crackAreaSyncInitial = React.useRef(true);
     React.useEffect(() => {
+        const normalized = clamp((crackAreaLevel || 0) / 100, 0, 1);
+        const buckets = CRACK_AREA_BUCKETS;
+        const maxActive = Math.max(1, Math.round(1 + normalized * (buckets - 1)));
+        const band = lerp(CRACK_AREA_MIN_BAND, CRACK_AREA_MAX_BAND, normalized);
+        const baseScale = lerp(CRACK_AREA_MIN_BASE, CRACK_AREA_MAX_BASE, normalized);
         try {
+            (config as any).render = (config as any).render || {};
+            const prev = (config as any).render.crackNoiseParams || {};
             (config as any).render.crackNoiseParams = {
-                ...(config as any).render.crackNoiseParams,
-                baseScale: cnBaseScale,
-                octaves: Math.max(1, Math.round(cnOctaves)),
-                lacunarity: cnLacunarity,
-                gain: cnGain,
-                buckets: Math.max(1, Math.round(cnBuckets)),
-                crackBandWidth: cnCrackBandWidth,
-                maxActiveBuckets: Math.max(1, Math.min(Math.max(1, Math.round(cnBuckets)), Math.round(cnMaxActiveBuckets))),
-                activeBucketStrategy: cnActiveStrategy || 'smallest'
+                ...prev,
+                baseScale,
+                buckets,
+                octaves: Math.max(1, Math.round(prev.octaves || 4)),
+                lacunarity: typeof prev.lacunarity === 'number' ? prev.lacunarity : 2.0,
+                gain: typeof prev.gain === 'number' ? prev.gain : 0.5,
+                crackBandWidth: band,
+                maxActiveBuckets: maxActive,
+                activeBucketStrategy: 'smallest'
             };
+            (config as any).render.crackNoiseAreaLevel = normalized;
         } catch (e) {}
-        try { localStorage.setItem('crack.baseScale', String(cnBaseScale)); } catch (e) {}
-        try { localStorage.setItem('crack.octaves', String(cnOctaves)); } catch (e) {}
-        try { localStorage.setItem('crack.lacunarity', String(cnLacunarity)); } catch (e) {}
-        try { localStorage.setItem('crack.gain', String(cnGain)); } catch (e) {}
-        try { localStorage.setItem('crack.buckets', String(cnBuckets)); } catch (e) {}
-        try { localStorage.setItem('crack.crackBandWidth', String(cnCrackBandWidth)); } catch (e) {}
-        try { localStorage.setItem('crack.maxActiveBuckets', String(cnMaxActiveBuckets)); } catch (e) {}
-        try { localStorage.setItem('crack.activeStrategy', String(cnActiveStrategy)); } catch (e) {}
-        setUiTick(t => t + 1);
-    }, [cnBaseScale, cnOctaves, cnLacunarity, cnGain, cnBuckets, cnCrackBandWidth, cnMaxActiveBuckets, cnActiveStrategy]);
+        try { localStorage.setItem('crack.areaLevel', String(Math.round(clamp(crackAreaLevel, 0, 100)))); } catch (e) {}
+        if (crackAreaSyncInitial.current) {
+            crackAreaSyncInitial.current = false;
+        } else if (crackUseNoise) {
+            try { MapActions.generate((config as any).render?.crackSeed || Date.now()); } catch (e) {}
+        }
+    }, [crackAreaLevel, crackUseNoise]);
     // persist crashMaskEnabled
     React.useEffect(() => {
         try { (config as any).render.crashMaskEnabled = crashMaskEnabled; } catch (e) {}
@@ -444,7 +478,9 @@ const App: React.FC = () => {
             <GameCanvas interiorTexture={interiorTexture} interiorTextureScale={texScale} interiorTextureAlpha={texAlpha} interiorTextureTint={parseInt(texTint.slice(1),16)} crossfadeEnabled={crossfadeEnabled} crossfadeMs={crossfadeMs}
                 roadCrackTexture={roadCrackTexture} roadCrackScale={crackScale} roadCrackAlpha={crackAlpha}
                 edgeTexture={edgeTexture} edgeScale={edgeScale} edgeAlpha={edgeAlpha}
-                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha} />
+                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha}
+                crashMaskEnabled={crashMaskEnabled}
+            />
             <div id="control-bar" className={controlsCollapsed ? 'collapsed' : ''}>
                 <button id="control-bar-toggle" onClick={() => setControlsCollapsed(c => !c)} style={{ marginRight: 8 }}>
                     {controlsCollapsed ? 'Expandir' : 'Colapsar'}
@@ -737,39 +773,36 @@ const App: React.FC = () => {
                 <div style={{ display: 'inline-block', marginLeft: 12, padding: '6px', border: '1px solid #444', borderRadius: 6 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Crack Noise</div>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar fBm para delimitar
+                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar áreas procedurais
                     </label>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                         <input type="checkbox" checked={crashMaskEnabled} onChange={(e) => setCrashMaskEnabled(e.target.checked)} /> Aplicar Crash Mask (apenas nas vias)
                     </label>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Base scale (1/m)</label>
-                        <input type="number" step={0.0001} min={0.0001} value={cnBaseScale} onChange={(e) => setCnBaseScale(parseFloat(e.target.value) || 0.002)} style={{ width: 100 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Octaves</label>
-                        <input type="number" step={1} min={1} max={8} value={cnOctaves} onChange={(e) => setCnOctaves(Math.max(1, parseInt(e.target.value || '4', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Lacunarity</label>
-                        <input type="number" step={0.1} min={1} value={cnLacunarity} onChange={(e) => setCnLacunarity(parseFloat(e.target.value) || 2.0)} style={{ width: 80 }} />
-                        <label style={{ fontSize: 12 }}>Gain</label>
-                        <input type="number" step={0.01} min={0} max={1} value={cnGain} onChange={(e) => setCnGain(parseFloat(e.target.value) || 0.5)} style={{ width: 80 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Buckets</label>
-                        <input type="number" step={1} min={1} max={8} value={cnBuckets} onChange={(e) => setCnBuckets(Math.max(1, parseInt(e.target.value || '3', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Active</label>
-                        <input type="number" step={1} min={1} max={8} value={cnMaxActiveBuckets} onChange={(e) => setCnMaxActiveBuckets(Math.max(1, parseInt(e.target.value || '2', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Band</label>
-                        <input type="number" step={0.001} min={0.001} max={0.1} value={cnCrackBandWidth} onChange={(e) => setCnCrackBandWidth(parseFloat(e.target.value) || 0.008)} style={{ width: 90 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Strategy</label>
-                        <select value={cnActiveStrategy} onChange={(e) => setCnActiveStrategy(e.target.value)}>
-                            <option value="smallest">Smallest regions</option>
-                            <option value="largest">Largest regions</option>
-                            <option value="random">Random</option>
-                        </select>
-                        <span style={{ fontSize: 11, opacity: 0.75, marginLeft: 8 }}>Use o botão Regenerate ao lado para aplicar.</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                        <label style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                            <span style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span>Quantidade de áreas</span>
+                                <span style={{ fontSize: 11, opacity: 0.8 }}>{crackAreaActiveBuckets}/{CRACK_AREA_BUCKETS} buckets ativos</span>
+                            </span>
+                            <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={crackAreaLevel}
+                                onChange={(e) => {
+                                    const parsed = parseInt(e.target.value || '0', 10);
+                                    updateCrackAreaLevel(Number.isFinite(parsed) ? parsed : crackAreaLevel);
+                                }}
+                                disabled={!crackUseNoise}
+                            />
+                        </label>
+                        <div style={{ fontSize: 11, opacity: 0.75, lineHeight: 1.3 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span>Menos áreas</span>
+                                <span>Mais áreas</span>
+                            </div>
+                            <div style={{ marginTop: 4 }}>Faixa ativa aproximada: {(crackAreaBandFraction * 100).toFixed(1)}% da célula</div>
+                        </div>
                     </div>
                 </div>
                 {/* Painel para textura dos marcadores (será usada por cada retângulo de faixa) */}
@@ -884,36 +917,33 @@ const App: React.FC = () => {
                             // Low quality: faster, coarser noise
                             (config as any).render = {
                                 ...(config as any).render,
-                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 0.5 },
-                                crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 2, octaves: 3, crackBandWidth: 0.02, maxActiveBuckets: 1 }
+                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 0.5 }
                             };
-                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                            setUiTick(t => t + 1);
                         } catch (e) {}
+                        updateCrackAreaLevel(20, { forceRegenerate: true });
+                        setUiTick(t => t + 1);
                     }}>Low</button>
                     <button onClick={() => {
                         try {
                             // Medium quality: balanced
                             (config as any).render = {
                                 ...(config as any).render,
-                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 1 },
-                                crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 3, octaves: 4, crackBandWidth: 0.012, maxActiveBuckets: 2 }
+                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 1 }
                             };
-                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                            setUiTick(t => t + 1);
                         } catch (e) {}
+                        updateCrackAreaLevel(55, { forceRegenerate: true });
+                        setUiTick(t => t + 1);
                     }}>Medium</button>
                     <button onClick={() => {
                         try {
                             // High quality: finer noise and more buckets (may be slower / larger raster)
                             (config as any).render = {
                                 ...(config as any).render,
-                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 2 },
-                                crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 5, octaves: 5, crackBandWidth: 0.006, maxActiveBuckets: 3 }
+                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 2 }
                             };
-                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                            setUiTick(t => t + 1);
                         } catch (e) {}
+                        updateCrackAreaLevel(85, { forceRegenerate: true });
+                        setUiTick(t => t + 1);
                     }}>High</button>
                     <span style={{ fontSize: 11, opacity: 0.85, marginLeft: 8 }}>Presets adjust `quality` and noise params; High may be slower or hit canvas clamps.</span>
                 </div>
