@@ -173,6 +173,21 @@ export interface CrackRaster {
         minY: number;
         quality: number;
     };
+    fbmMask?: {
+        data: Uint8Array;
+        width: number;
+        height: number;
+        minX: number;
+        minY: number;
+    };
+    crashMask?: {
+        data: Uint8Array;
+        width: number;
+        height: number;
+        minX: number;
+        minY: number;
+        quality: number;
+    };
 }
 
 export interface CrackRasterOptions {
@@ -300,6 +315,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_regionCellW = 0;
     let debug_regionCellH = 0;
     let debug_buckets = 0;
+    let fbmMaskFull: Uint8Array | null = null;
     const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
 
     if (renderConfig?.crackUseNoise) {
@@ -400,7 +416,6 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         // Pre-generate an FBM mask at the original render resolution (width x height)
         // and sample it per-canvas pixel. This avoids subtle coordinate mismatches
         // between canvas-res sampling and the coarse region map used below.
-        let fbmMaskFull: Uint8Array | null = null;
         try {
             fbmMaskFull = generateFbmMask({
                 width: width,
@@ -510,6 +525,15 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     }
 
     const out: CrackRaster = { data, width: canvasW, height: canvasH, quality, color: [24, 24, 24] };
+    if (fbmMaskFull) {
+        out.fbmMask = {
+            data: fbmMaskFull,
+            width,
+            height,
+            minX,
+            minY,
+        };
+    }
     if (attachDebugRegionRequested && debug_regionMap) {
         out.debugRegion = {
             map: debug_regionMap,
