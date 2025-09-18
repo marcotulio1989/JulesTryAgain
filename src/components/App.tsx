@@ -197,6 +197,14 @@ const App: React.FC = () => {
     const [cnCrackBandWidth, setCnCrackBandWidth] = useState<number>(() => safeLoadNumber('crack.crackBandWidth', (config as any).render.crackNoiseParams?.crackBandWidth || 0.008));
     const [cnMaxActiveBuckets, setCnMaxActiveBuckets] = useState<number>(() => safeLoadNumber('crack.maxActiveBuckets', (config as any).render.crackNoiseParams?.maxActiveBuckets || 2));
     const [cnActiveStrategy, setCnActiveStrategy] = useState<string>(() => (config as any).render.crackNoiseParams?.activeBucketStrategy || 'smallest');
+    const defaultBucketCount = Math.max(1, Math.round(cnBuckets || 1));
+    const defaultActiveCount = Math.max(1, Math.min(defaultBucketCount, Math.round(cnMaxActiveBuckets || 1)));
+    const defaultDensity = defaultBucketCount <= 1 ? 1 : (defaultActiveCount - 1) / (defaultBucketCount - 1);
+    const [crackAreaDensity, setCrackAreaDensity] = useState<number>(() => {
+        const stored = safeLoadNumber('crack.areaDensity', defaultDensity);
+        if (!isFinite(stored)) return defaultDensity;
+        return Math.max(0, Math.min(1, stored));
+    });
     const [edgeScale, setEdgeScale] = useState<number>(() => safeLoadNumber('edgeScale', (config as any).render.edgeTextureScale || 1.0));
     const [edgeAlpha, setEdgeAlpha] = useState<number>(() => safeLoadNumber('edgeAlpha', (config as any).render.edgeTextureAlpha ?? 1.0));
     // controls for road lane overlay
@@ -330,6 +338,27 @@ const App: React.FC = () => {
         try { localStorage.setItem('crack.activeStrategy', String(cnActiveStrategy)); } catch (e) {}
         setUiTick(t => t + 1);
     }, [cnBaseScale, cnOctaves, cnLacunarity, cnGain, cnBuckets, cnCrackBandWidth, cnMaxActiveBuckets, cnActiveStrategy]);
+    React.useEffect(() => {
+        const bucketCount = Math.max(1, Math.round(cnBuckets));
+        const computedActive = bucketCount <= 1
+            ? 1
+            : Math.max(1, Math.min(bucketCount, Math.round(1 + crackAreaDensity * (bucketCount - 1))));
+        if (computedActive !== Math.round(cnMaxActiveBuckets)) {
+            setCnMaxActiveBuckets(computedActive);
+        }
+        try { localStorage.setItem('crack.areaDensity', String(Math.max(0, Math.min(1, crackAreaDensity)))); } catch (e) {}
+    }, [crackAreaDensity, cnBuckets, cnMaxActiveBuckets]);
+    React.useEffect(() => {
+        const bucketCount = Math.max(1, Math.round(cnBuckets));
+        if (bucketCount <= 1) {
+            if (crackAreaDensity !== 1) setCrackAreaDensity(1);
+            return;
+        }
+        const normalized = (Math.max(1, Math.min(bucketCount, Math.round(cnMaxActiveBuckets))) - 1) / (bucketCount - 1);
+        if (Math.abs(normalized - crackAreaDensity) > 0.005) {
+            setCrackAreaDensity(Math.max(0, Math.min(1, normalized)));
+        }
+    }, [cnMaxActiveBuckets, cnBuckets, crackAreaDensity]);
     // persist crashMaskEnabled
     React.useEffect(() => {
         try { (config as any).render.crashMaskEnabled = crashMaskEnabled; } catch (e) {}
@@ -444,7 +473,9 @@ const App: React.FC = () => {
             <GameCanvas interiorTexture={interiorTexture} interiorTextureScale={texScale} interiorTextureAlpha={texAlpha} interiorTextureTint={parseInt(texTint.slice(1),16)} crossfadeEnabled={crossfadeEnabled} crossfadeMs={crossfadeMs}
                 roadCrackTexture={roadCrackTexture} roadCrackScale={crackScale} roadCrackAlpha={crackAlpha}
                 edgeTexture={edgeTexture} edgeScale={edgeScale} edgeAlpha={edgeAlpha}
-                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha} />
+                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha}
+                crashMaskEnabled={crashMaskEnabled}
+            />
             <div id="control-bar" className={controlsCollapsed ? 'collapsed' : ''}>
                 <button id="control-bar-toggle" onClick={() => setControlsCollapsed(c => !c)} style={{ marginRight: 8 }}>
                     {controlsCollapsed ? 'Expandir' : 'Colapsar'}
@@ -742,35 +773,59 @@ const App: React.FC = () => {
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                         <input type="checkbox" checked={crashMaskEnabled} onChange={(e) => setCrashMaskEnabled(e.target.checked)} /> Aplicar Crash Mask (apenas nas vias)
                     </label>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Base scale (1/m)</label>
-                        <input type="number" step={0.0001} min={0.0001} value={cnBaseScale} onChange={(e) => setCnBaseScale(parseFloat(e.target.value) || 0.002)} style={{ width: 100 }} />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 8 }}>
+                        <label style={{ fontSize: 12 }}>Quantidade de áreas de rachadura</label>
+                        <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={Math.round(Math.max(0, Math.min(1, crackAreaDensity)) * 100)}
+                            onChange={(e) => {
+                                const next = Number(e.target.value);
+                                if (isFinite(next)) {
+                                    setCrackAreaDensity(Math.max(0, Math.min(1, next / 100)));
+                                }
+                            }}
+                            disabled={!crackUseNoise}
+                        />
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, opacity: 0.8 }}>
+                            <span>Ativas: {Math.max(1, Math.round(cnMaxActiveBuckets))} / {Math.max(1, Math.round(cnBuckets))}</span>
+                            <span>{Math.round(Math.max(0, Math.min(1, crackAreaDensity)) * 100)}%</span>
+                        </div>
+                        <span style={{ fontSize: 11, opacity: 0.75 }}>Use o botão Regenerate ao lado para aplicar.</span>
                     </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Octaves</label>
-                        <input type="number" step={1} min={1} max={8} value={cnOctaves} onChange={(e) => setCnOctaves(Math.max(1, parseInt(e.target.value || '4', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Lacunarity</label>
-                        <input type="number" step={0.1} min={1} value={cnLacunarity} onChange={(e) => setCnLacunarity(parseFloat(e.target.value) || 2.0)} style={{ width: 80 }} />
-                        <label style={{ fontSize: 12 }}>Gain</label>
-                        <input type="number" step={0.01} min={0} max={1} value={cnGain} onChange={(e) => setCnGain(parseFloat(e.target.value) || 0.5)} style={{ width: 80 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Buckets</label>
-                        <input type="number" step={1} min={1} max={8} value={cnBuckets} onChange={(e) => setCnBuckets(Math.max(1, parseInt(e.target.value || '3', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Active</label>
-                        <input type="number" step={1} min={1} max={8} value={cnMaxActiveBuckets} onChange={(e) => setCnMaxActiveBuckets(Math.max(1, parseInt(e.target.value || '2', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Band</label>
-                        <input type="number" step={0.001} min={0.001} max={0.1} value={cnCrackBandWidth} onChange={(e) => setCnCrackBandWidth(parseFloat(e.target.value) || 0.008)} style={{ width: 90 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Strategy</label>
-                        <select value={cnActiveStrategy} onChange={(e) => setCnActiveStrategy(e.target.value)}>
-                            <option value="smallest">Smallest regions</option>
-                            <option value="largest">Largest regions</option>
-                            <option value="random">Random</option>
-                        </select>
-                        <span style={{ fontSize: 11, opacity: 0.75, marginLeft: 8 }}>Use o botão Regenerate ao lado para aplicar.</span>
-                    </div>
+                    <details style={{ marginTop: 8 }}>
+                        <summary style={{ fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>Configurações avançadas</summary>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <label style={{ fontSize: 12 }}>Base scale (1/m)</label>
+                                <input type="number" step={0.0001} min={0.0001} value={cnBaseScale} onChange={(e) => setCnBaseScale(parseFloat(e.target.value) || 0.002)} style={{ width: 100 }} />
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <label style={{ fontSize: 12 }}>Octaves</label>
+                                <input type="number" step={1} min={1} max={8} value={cnOctaves} onChange={(e) => setCnOctaves(Math.max(1, parseInt(e.target.value || '4', 10)))} style={{ width: 70 }} />
+                                <label style={{ fontSize: 12 }}>Lacunarity</label>
+                                <input type="number" step={0.1} min={1} value={cnLacunarity} onChange={(e) => setCnLacunarity(parseFloat(e.target.value) || 2.0)} style={{ width: 80 }} />
+                                <label style={{ fontSize: 12 }}>Gain</label>
+                                <input type="number" step={0.01} min={0} max={1} value={cnGain} onChange={(e) => setCnGain(parseFloat(e.target.value) || 0.5)} style={{ width: 80 }} />
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <label style={{ fontSize: 12 }}>Buckets</label>
+                                <input type="number" step={1} min={1} max={8} value={cnBuckets} onChange={(e) => setCnBuckets(Math.max(1, parseInt(e.target.value || '3', 10)))} style={{ width: 70 }} />
+                                <label style={{ fontSize: 12 }}>Band</label>
+                                <input type="number" step={0.001} min={0.001} max={0.1} value={cnCrackBandWidth} onChange={(e) => setCnCrackBandWidth(parseFloat(e.target.value) || 0.008)} style={{ width: 90 }} />
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <label style={{ fontSize: 12 }}>Strategy</label>
+                                <select value={cnActiveStrategy} onChange={(e) => setCnActiveStrategy(e.target.value)}>
+                                    <option value="smallest">Smallest regions</option>
+                                    <option value="largest">Largest regions</option>
+                                    <option value="random">Random</option>
+                                </select>
+                            </div>
+                        </div>
+                    </details>
                 </div>
                 {/* Painel para textura dos marcadores (será usada por cada retângulo de faixa) */}
                 <div style={{ display: 'inline-block', marginLeft: 12 }}>

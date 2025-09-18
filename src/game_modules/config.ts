@@ -285,6 +285,8 @@ export const config = {
     intersectionPatchAlwaysVisibleWithOutlines: true,
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
+    // Toggle procedural crash mask (intersection of FBM buckets & road polygons)
+    crashMaskEnabled: false,
     // Crack mask debug/padding controls (UI-adjustable)
     debugCrackMask: false,
     // Show FBM delimitations (separate toggle for fBm regions / buckets)
@@ -298,7 +300,7 @@ export const config = {
     // Use procedural cracks baked via Voronoi preview logic by default
     crackUseProcedural: true,
     crackProceduralParams: {
-        divisions: 400,
+        divisions: 600,
         thickness: 6,
         dilateRadius: 2,
         quality: 2,
