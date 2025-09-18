@@ -755,7 +755,7 @@ const App: React.FC = () => {
                             <option value="largest">Largest regions</option>
                             <option value="random">Random</option>
                         </select>
-                        <button onClick={() => { setUiTick(t => t + 1); MapActions.generate(Date.now()); }} style={{ marginLeft: 8 }}>Regenerate Map</button>
+                        <span style={{ fontSize: 11, opacity: 0.75, marginLeft: 8 }}>Use o botão Regenerate ao lado para aplicar.</span>
                     </div>
                 </div>
                 {/* Painel para textura dos marcadores (será usada por cada retângulo de faixa) */}

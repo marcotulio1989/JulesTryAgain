@@ -164,9 +164,35 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         const renderCfg = (config as any).render || {};
         const crackCfg = renderCfg.crackProceduralParams || {};
         const fallbackQuality = (typeof crackCfg.quality === 'number' && isFinite(crackCfg.quality)) ? crackCfg.quality : ((typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1);
-        const quality = Math.max(1, Math.min(4, fallbackQuality || 1));
-        const canvasW = Math.max(1, Math.round(spriteW * quality));
-        const canvasH = Math.max(1, Math.round(spriteH * quality));
+        const minQuality = Math.max(0.1, Math.min(1, (typeof crackCfg.minQuality === 'number' && isFinite(crackCfg.minQuality)) ? crackCfg.minQuality : 0.25));
+        const clampQuality = (q: number) => Math.max(minQuality, Math.min(4, q || minQuality));
+        const maxCanvasDimension = Math.max(64, Math.min(8192, (typeof crackCfg.maxCanvasDimension === 'number' && isFinite(crackCfg.maxCanvasDimension)) ? crackCfg.maxCanvasDimension : 4096));
+        const maxCanvasPixels = Math.max(16384, Math.min(67108864, (typeof crackCfg.maxCanvasPixels === 'number' && isFinite(crackCfg.maxCanvasPixels)) ? crackCfg.maxCanvasPixels : 5_000_000));
+        let quality = clampQuality(fallbackQuality || 1);
+        let canvasW = Math.max(1, Math.round(spriteW * quality));
+        let canvasH = Math.max(1, Math.round(spriteH * quality));
+
+        const applyQualityReduction = (factor: number) => {
+            if (!(factor > 1)) return;
+            quality = clampQuality(quality / factor);
+            canvasW = Math.max(1, Math.round(spriteW * quality));
+            canvasH = Math.max(1, Math.round(spriteH * quality));
+        };
+
+        if (canvasW > maxCanvasDimension || canvasH > maxCanvasDimension) {
+            const factor = Math.max(canvasW / maxCanvasDimension, canvasH / maxCanvasDimension);
+            applyQualityReduction(factor);
+        }
+
+        if (canvasW * canvasH > maxCanvasPixels) {
+            const factor = Math.sqrt((canvasW * canvasH) / maxCanvasPixels);
+            applyQualityReduction(factor);
+        }
+
+        if (canvasW > maxCanvasDimension || canvasH > maxCanvasDimension || canvasW * canvasH > maxCanvasPixels) {
+            console.warn('[GameCanvas] Procedural crack texture skipped – area too large after clamping', { canvasW, canvasH, quality });
+            return null;
+        }
         const seed = Math.floor((renderCfg.crackSeed ?? Date.now())) >>> 0;
         const divisions = (typeof crackCfg.divisions === 'number' && crackCfg.divisions > 0) ? crackCfg.divisions : 400;
         const thickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
@@ -2174,6 +2200,9 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             proceduralCrackTextureRef.current = procedural.texture;
                             proceduralCrackQualityRef.current = procedural.quality;
                             textureToUse = procedural.texture;
+                        } else {
+                            proceduralCrackTextureRef.current = null;
+                            proceduralCrackQualityRef.current = 1;
                         }
                     }
                     if (!textureToUse && textureFromProps) {
