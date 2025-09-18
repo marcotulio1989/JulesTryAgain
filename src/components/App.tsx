@@ -189,14 +189,60 @@ const App: React.FC = () => {
         try { const v = localStorage.getItem('crashMaskEnabled'); if (v !== null) return v === 'true'; } catch (e) {}
         return !!(config as any).render.crashMaskEnabled;
     });
-    const [cnBaseScale, setCnBaseScale] = useState<number>(() => safeLoadNumber('crack.baseScale', (config as any).render.crackNoiseParams?.baseScale || 1 / 480));
-    const [cnOctaves, setCnOctaves] = useState<number>(() => safeLoadNumber('crack.octaves', (config as any).render.crackNoiseParams?.octaves || 4));
-    const [cnLacunarity, setCnLacunarity] = useState<number>(() => safeLoadNumber('crack.lacunarity', (config as any).render.crackNoiseParams?.lacunarity || 2.0));
-    const [cnGain, setCnGain] = useState<number>(() => safeLoadNumber('crack.gain', (config as any).render.crackNoiseParams?.gain || 0.5));
-    const [cnBuckets, setCnBuckets] = useState<number>(() => safeLoadNumber('crack.buckets', (config as any).render.crackNoiseParams?.buckets || 3));
-    const [cnCrackBandWidth, setCnCrackBandWidth] = useState<number>(() => safeLoadNumber('crack.crackBandWidth', (config as any).render.crackNoiseParams?.crackBandWidth || 0.008));
-    const [cnMaxActiveBuckets, setCnMaxActiveBuckets] = useState<number>(() => safeLoadNumber('crack.maxActiveBuckets', (config as any).render.crackNoiseParams?.maxActiveBuckets || 2));
-    const [cnActiveStrategy, setCnActiveStrategy] = useState<string>(() => (config as any).render.crackNoiseParams?.activeBucketStrategy || 'smallest');
+    if (!(config as any).render.crackNoiseParams) {
+        (config as any).render.crackNoiseParams = {
+            baseScale: 1 / 480,
+            octaves: 4,
+            lacunarity: 2.0,
+            gain: 0.5,
+            buckets: 3,
+            crackBandWidth: 0.008,
+            maxActiveBuckets: 2,
+            activeBucketStrategy: 'smallest'
+        };
+    }
+    const ensureNoiseDefaults = () => {
+        const params = (config as any).render.crackNoiseParams || {};
+        const buckets = Math.max(1, Math.round(params.buckets ?? 3));
+        const maxActive = Math.max(1, Math.min(buckets, params.maxActiveBuckets ?? Math.max(1, Math.round(buckets / 2))));
+        return {
+            baseScale: params.baseScale ?? 1 / 480,
+            octaves: params.octaves ?? 4,
+            lacunarity: params.lacunarity ?? 2.0,
+            gain: params.gain ?? 0.5,
+            buckets,
+            crackBandWidth: params.crackBandWidth ?? 0.008,
+            maxActiveBuckets: maxActive,
+            activeBucketStrategy: params.activeBucketStrategy ?? 'smallest'
+        };
+    };
+    const noiseDefaultsRef = React.useRef<{
+        baseScale: number;
+        octaves: number;
+        lacunarity: number;
+        gain: number;
+        buckets: number;
+        crackBandWidth: number;
+        maxActiveBuckets: number;
+        activeBucketStrategy: string;
+    } | null>(null);
+    if (!noiseDefaultsRef.current) {
+        noiseDefaultsRef.current = ensureNoiseDefaults();
+    }
+    const noiseDefaults = noiseDefaultsRef.current!;
+    const [crackAreaCoverage, setCrackAreaCoverage] = useState<number>(() => {
+        const stored = safeLoadNumber('crack.areaCoverage', -1);
+        if (isFinite(stored) && stored >= 0 && stored <= 1) return stored;
+        return Math.min(1, Math.max(0, (noiseDefaults.maxActiveBuckets || 1) / Math.max(1, noiseDefaults.buckets || 1)));
+    });
+    const bucketsForDisplay = Math.max(1, noiseDefaults.buckets || 3);
+    const activeBucketsForDisplay = Math.max(1, Math.min(bucketsForDisplay, Math.round(1 + crackAreaCoverage * (bucketsForDisplay - 1))));
+    const coveragePercent = Math.round((activeBucketsForDisplay / bucketsForDisplay) * 100);
+    const coverageLabel = coveragePercent <= 33 ? 'Baixa' : (coveragePercent >= 67 ? 'Alta' : 'Média');
+    const baseBandDisplay = noiseDefaults.crackBandWidth || 0.008;
+    const minBandDisplay = Math.max(0.001, baseBandDisplay * 0.5);
+    const maxBandDisplay = Math.min(0.05, baseBandDisplay * 2.5);
+    const displayBandWidth = minBandDisplay + (maxBandDisplay - minBandDisplay) * crackAreaCoverage;
     const [edgeScale, setEdgeScale] = useState<number>(() => safeLoadNumber('edgeScale', (config as any).render.edgeTextureScale || 1.0));
     const [edgeAlpha, setEdgeAlpha] = useState<number>(() => safeLoadNumber('edgeAlpha', (config as any).render.edgeTextureAlpha ?? 1.0));
     // controls for road lane overlay
@@ -307,29 +353,31 @@ const App: React.FC = () => {
     }, [crackUseNoise]);
 
     React.useEffect(() => {
-        try {
-            (config as any).render.crackNoiseParams = {
-                ...(config as any).render.crackNoiseParams,
-                baseScale: cnBaseScale,
-                octaves: Math.max(1, Math.round(cnOctaves)),
-                lacunarity: cnLacunarity,
-                gain: cnGain,
-                buckets: Math.max(1, Math.round(cnBuckets)),
-                crackBandWidth: cnCrackBandWidth,
-                maxActiveBuckets: Math.max(1, Math.min(Math.max(1, Math.round(cnBuckets)), Math.round(cnMaxActiveBuckets))),
-                activeBucketStrategy: cnActiveStrategy || 'smallest'
-            };
-        } catch (e) {}
-        try { localStorage.setItem('crack.baseScale', String(cnBaseScale)); } catch (e) {}
-        try { localStorage.setItem('crack.octaves', String(cnOctaves)); } catch (e) {}
-        try { localStorage.setItem('crack.lacunarity', String(cnLacunarity)); } catch (e) {}
-        try { localStorage.setItem('crack.gain', String(cnGain)); } catch (e) {}
-        try { localStorage.setItem('crack.buckets', String(cnBuckets)); } catch (e) {}
-        try { localStorage.setItem('crack.crackBandWidth', String(cnCrackBandWidth)); } catch (e) {}
-        try { localStorage.setItem('crack.maxActiveBuckets', String(cnMaxActiveBuckets)); } catch (e) {}
-        try { localStorage.setItem('crack.activeStrategy', String(cnActiveStrategy)); } catch (e) {}
+        const defaults = noiseDefaultsRef.current;
+        if (!defaults) return;
+        const params = (config as any).render.crackNoiseParams || {};
+        const buckets = Math.max(1, defaults.buckets || params.buckets || 3);
+        const coverage = Math.min(1, Math.max(0, crackAreaCoverage));
+        const activeCount = Math.max(1, Math.min(buckets, Math.round(1 + coverage * (buckets - 1))));
+        const baseBand = defaults.crackBandWidth || 0.008;
+        const minBand = Math.max(0.001, baseBand * 0.5);
+        const maxBand = Math.min(0.05, baseBand * 2.5);
+        const computedBand = minBand + (maxBand - minBand) * coverage;
+        const nextParams = {
+            ...params,
+            baseScale: defaults.baseScale,
+            octaves: defaults.octaves,
+            lacunarity: defaults.lacunarity,
+            gain: defaults.gain,
+            buckets,
+            crackBandWidth: computedBand,
+            maxActiveBuckets: activeCount,
+            activeBucketStrategy: params.activeBucketStrategy || defaults.activeBucketStrategy || 'smallest'
+        };
+        (config as any).render.crackNoiseParams = nextParams;
+        try { localStorage.setItem('crack.areaCoverage', String(coverage)); } catch (e) {}
         setUiTick(t => t + 1);
-    }, [cnBaseScale, cnOctaves, cnLacunarity, cnGain, cnBuckets, cnCrackBandWidth, cnMaxActiveBuckets, cnActiveStrategy]);
+    }, [crackAreaCoverage]);
     // persist crashMaskEnabled
     React.useEffect(() => {
         try { (config as any).render.crashMaskEnabled = crashMaskEnabled; } catch (e) {}
@@ -444,7 +492,9 @@ const App: React.FC = () => {
             <GameCanvas interiorTexture={interiorTexture} interiorTextureScale={texScale} interiorTextureAlpha={texAlpha} interiorTextureTint={parseInt(texTint.slice(1),16)} crossfadeEnabled={crossfadeEnabled} crossfadeMs={crossfadeMs}
                 roadCrackTexture={roadCrackTexture} roadCrackScale={crackScale} roadCrackAlpha={crackAlpha}
                 edgeTexture={edgeTexture} edgeScale={edgeScale} edgeAlpha={edgeAlpha}
-                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha} />
+                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha}
+                crashMaskEnabled={crashMaskEnabled}
+            />
             <div id="control-bar" className={controlsCollapsed ? 'collapsed' : ''}>
                 <button id="control-bar-toggle" onClick={() => setControlsCollapsed(c => !c)} style={{ marginRight: 8 }}>
                     {controlsCollapsed ? 'Expandir' : 'Colapsar'}
@@ -742,34 +792,31 @@ const App: React.FC = () => {
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                         <input type="checkbox" checked={crashMaskEnabled} onChange={(e) => setCrashMaskEnabled(e.target.checked)} /> Aplicar Crash Mask (apenas nas vias)
                     </label>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Base scale (1/m)</label>
-                        <input type="number" step={0.0001} min={0.0001} value={cnBaseScale} onChange={(e) => setCnBaseScale(parseFloat(e.target.value) || 0.002)} style={{ width: 100 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Octaves</label>
-                        <input type="number" step={1} min={1} max={8} value={cnOctaves} onChange={(e) => setCnOctaves(Math.max(1, parseInt(e.target.value || '4', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Lacunarity</label>
-                        <input type="number" step={0.1} min={1} value={cnLacunarity} onChange={(e) => setCnLacunarity(parseFloat(e.target.value) || 2.0)} style={{ width: 80 }} />
-                        <label style={{ fontSize: 12 }}>Gain</label>
-                        <input type="number" step={0.01} min={0} max={1} value={cnGain} onChange={(e) => setCnGain(parseFloat(e.target.value) || 0.5)} style={{ width: 80 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Buckets</label>
-                        <input type="number" step={1} min={1} max={8} value={cnBuckets} onChange={(e) => setCnBuckets(Math.max(1, parseInt(e.target.value || '3', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Active</label>
-                        <input type="number" step={1} min={1} max={8} value={cnMaxActiveBuckets} onChange={(e) => setCnMaxActiveBuckets(Math.max(1, parseInt(e.target.value || '2', 10)))} style={{ width: 70 }} />
-                        <label style={{ fontSize: 12 }}>Band</label>
-                        <input type="number" step={0.001} min={0.001} max={0.1} value={cnCrackBandWidth} onChange={(e) => setCnCrackBandWidth(parseFloat(e.target.value) || 0.008)} style={{ width: 90 }} />
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-                        <label style={{ fontSize: 12 }}>Strategy</label>
-                        <select value={cnActiveStrategy} onChange={(e) => setCnActiveStrategy(e.target.value)}>
-                            <option value="smallest">Smallest regions</option>
-                            <option value="largest">Largest regions</option>
-                            <option value="random">Random</option>
-                        </select>
-                        <span style={{ fontSize: 11, opacity: 0.75, marginLeft: 8 }}>Use o botão Regenerate ao lado para aplicar.</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
+                        <label style={{ fontSize: 12, fontWeight: 600 }}>Quantidade de áreas com rachadura</label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontSize: 11, opacity: 0.7 }}>Menos</span>
+                            <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                step={1}
+                                value={Math.round(crackAreaCoverage * 100)}
+                                onChange={(e) => {
+                                    const raw = parseInt(e.target.value, 10);
+                                    const normalized = isFinite(raw) ? Math.min(1, Math.max(0, raw / 100)) : 0;
+                                    setCrackAreaCoverage(normalized);
+                                }}
+                                style={{ flex: 1 }}
+                            />
+                            <span style={{ fontSize: 11, opacity: 0.7 }}>Mais</span>
+                        </div>
+                        <div style={{ fontSize: 11, opacity: 0.8 }}>
+                            Cobertura {coverageLabel} ({coveragePercent}%) · {activeBucketsForDisplay}/{bucketsForDisplay} regiões ativas · faixa ≈ {displayBandWidth.toFixed(3)}
+                        </div>
+                        <div style={{ fontSize: 10, opacity: 0.6 }}>
+                            Ajuste o controle e pressione Regenerate para recalcular as rachaduras.
+                        </div>
                     </div>
                 </div>
                 {/* Painel para textura dos marcadores (será usada por cada retângulo de faixa) */}
