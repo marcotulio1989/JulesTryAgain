@@ -285,9 +285,11 @@ export const config = {
     intersectionPatchAlwaysVisibleWithOutlines: true,
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
+    // Toggle procedural crash mask (intersection of active buckets & road polygons)
+    crashMaskEnabled: false,
     // Crack mask debug/padding controls (UI-adjustable)
     debugCrackMask: false,
-    // Show FBM delimitations (separate toggle for fBm regions / buckets)
+    // Show bucket delimitations (separate toggle for bucket regions)
     showFbmDelimitations: false,
     // Default padding (px) used for crack mask bounding boxes
     crackMaskPaddingDefault: 4,
@@ -303,13 +305,10 @@ export const config = {
         dilateRadius: 2,
         quality: 2,
     },
-    // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
+    // Use bucket-based zoning to distribute cracks instead of masking full roads
     crackUseNoise: true,
-    // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
-    // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
-    // - octaves/lacunarity/gain: parâmetros de fBm.
-    // - buckets: número de regiões quantizadas no mapa de ruído.
-    // - crackBandWidth: largura da faixa em torno do centro do bucket que gera rachaduras (0.002..0.1)
+    // Parâmetros para geração procedural de rachaduras via buckets Voronoi.
+    // - buckets: número de regiões aleatórias.
     // - maxActiveBuckets: quantos buckets são efetivamente usados para desenhar rachaduras
     crackNoiseParams: {
         baseScale: 1 / 480,

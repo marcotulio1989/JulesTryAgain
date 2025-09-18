@@ -444,7 +444,9 @@ const App: React.FC = () => {
             <GameCanvas interiorTexture={interiorTexture} interiorTextureScale={texScale} interiorTextureAlpha={texAlpha} interiorTextureTint={parseInt(texTint.slice(1),16)} crossfadeEnabled={crossfadeEnabled} crossfadeMs={crossfadeMs}
                 roadCrackTexture={roadCrackTexture} roadCrackScale={crackScale} roadCrackAlpha={crackAlpha}
                 edgeTexture={edgeTexture} edgeScale={edgeScale} edgeAlpha={edgeAlpha}
-                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha} />
+                roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha}
+                crashMaskEnabled={crashMaskEnabled}
+            />
             <div id="control-bar" className={controlsCollapsed ? 'collapsed' : ''}>
                 <button id="control-bar-toggle" onClick={() => setControlsCollapsed(c => !c)} style={{ marginRight: 8 }}>
                     {controlsCollapsed ? 'Expandir' : 'Colapsar'}
@@ -803,11 +805,11 @@ const App: React.FC = () => {
                     <input type="checkbox" checked={Boolean((config as any).render?.debugCrackMask)} onChange={(e) => { (config as any).render = { ...(config as any).render, debugCrackMask: e.target.checked }; setUiTick(t => t + 1); }} /> Show crack mask debug
                 </label>
                 <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={Boolean((config as any).render?.showFbmDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showFbmDelimitations: e.target.checked }; try { localStorage.setItem('showFbmDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show FBM delimitations
+                    <input type="checkbox" checked={Boolean((config as any).render?.showFbmDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showFbmDelimitations: e.target.checked }; try { localStorage.setItem('showFbmDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show bucket delimitations
                 </label>
-                {/* Small UI panel showing detected FBM buckets and manual overrides */}
+                {/* Small UI panel showing detected bucket zones and manual overrides */}
                 <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    {/* Legend for FBM bucket states */}
+                    {/* Legend for bucket states */}
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '6px 8px', borderRadius: 6 }}>
                         <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
                             <div style={{ fontSize: 11, color: '#EEE', fontWeight: 700 }}>Legenda</div>
@@ -838,7 +840,7 @@ const App: React.FC = () => {
                             const ids = Object.keys(detected).map(k => parseInt(k, 10)).filter(n => !isNaN(n)).sort((a,b)=>a-b);
                             return (
                                 <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', background: 'rgba(0,0,0,0.45)', padding: '6px 8px', borderRadius: 6 }}>
-                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>FBM Buckets</div>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>Bucket Zones</div>
                                     {ids.map(id => {
                                         const count = detected[id] || 0;
                                         const active = Array.isArray(forced) ? forced.indexOf(id) >= 0 : false;
