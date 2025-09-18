@@ -287,6 +287,8 @@ export const config = {
     showBlockOutlines: true,
     // Crack mask debug/padding controls (UI-adjustable)
     debugCrackMask: false,
+    // Show FBM delimitations (separate toggle for fBm regions / buckets)
+    showFbmDelimitations: false,
     // Default padding (px) used for crack mask bounding boxes
     crackMaskPaddingDefault: 4,
     // Extra padding (px) applied when heuristic triggers — fallback default 8

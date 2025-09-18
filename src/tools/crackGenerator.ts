@@ -1,4 +1,5 @@
 import { Noise } from 'noisejs';
+import { generateFbmMask } from './fbmMask';
 
 export interface CrackGeneratorOptions {
     divisions: number;
@@ -17,7 +18,7 @@ function makeRng(seed: number) {
     };
 }
 
-const fbmNoise = (noise: Noise, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5) => {
+export const fbmNoise = (noise: Noise, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5) => {
     let freq = 1;
     let amp = 1;
     let sum = 0;
@@ -160,6 +161,18 @@ export interface CrackRaster {
     height: number;
     quality: number;
     color: [number, number, number];
+    // Optional debug info for FBM region visualization
+    debugRegion?: {
+        map: Uint8Array;
+        w: number;
+        h: number;
+        buckets: number;
+        cellW: number;
+        cellH: number;
+        minX: number;
+        minY: number;
+        quality: number;
+    };
 }
 
 export interface CrackRasterOptions {
@@ -207,6 +220,57 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         if (typeof console !== 'undefined' && console.warn) {
             console.warn('[crackGenerator] Procedural crack raster skipped – area too large after clamping', { canvasW, canvasH, quality });
         }
+        // If the caller explicitly requested FBM debug delimitations, return a
+        // tiny placeholder raster that includes a coarse `debugRegion` so the
+        // UI can still visualize FBM buckets even when the full raster is
+        // skipped due to clamping limits.
+    if (renderConfig?.showFbmDelimitations && renderConfig?.crackUseNoise) {
+            try {
+                const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
+                const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3 };
+                const baseScale = noiseCfg.baseScale || 1 / 480;
+                const octaves = noiseCfg.octaves || 4;
+                const lacunarity = noiseCfg.lacunarity || 2;
+                const gain = noiseCfg.gain || 0.5;
+                const buckets = Math.max(1, Math.min(8, noiseCfg.buckets || 3));
+                const debug_regionW = Math.max(4, Math.min(64, Math.floor(Math.min(width, height) / 32) || 8));
+                const debug_regionH = Math.max(4, Math.min(64, Math.floor(Math.min(width, height) / 32) || 8));
+                const regionNoise = new Noise(seed || 1);
+                const debug_regionMap = new Uint8Array(debug_regionW * debug_regionH);
+                for (let ry = 0; ry < debug_regionH; ry++) {
+                    for (let rx = 0; rx < debug_regionW; rx++) {
+                        const sampleX = ((rx + 0.5) / debug_regionW) * width;
+                        const sampleY = ((ry + 0.5) / debug_regionH) * height;
+                        const screenPt = { x: sampleX + minX, y: sampleY + minY };
+                        const worldPt = (renderConfig && renderConfig.mode === 'isometric')
+                            ? { x: screenPt.x, y: screenPt.y }
+                            : isoToWorld(screenPt);
+                        const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                        let id = Math.floor(v * buckets);
+                        if (id < 0) id = 0;
+                        if (id >= buckets) id = buckets - 1;
+                        debug_regionMap[ry * debug_regionW + rx] = id;
+                    }
+                }
+                const placeholderData = new Uint8ClampedArray(4); // 1 pixel transparent placeholder
+                placeholderData[0] = 0; placeholderData[1] = 0; placeholderData[2] = 0; placeholderData[3] = 0;
+                const out: CrackRaster = { data: placeholderData, width: 1, height: 1, quality, color: [24,24,24] };
+                out.debugRegion = {
+                    map: debug_regionMap,
+                    w: debug_regionW,
+                    h: debug_regionH,
+                    buckets,
+                    cellW: debug_regionW > 0 ? width / debug_regionW : width,
+                    cellH: debug_regionH > 0 ? height / debug_regionH : height,
+                    minX,
+                    minY,
+                    quality,
+                };
+                return out;
+            } catch (e) {
+                // fall through to returning null if debug computation fails
+            }
+        }
         return null;
     }
 
@@ -224,6 +288,20 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         color: [24, 24, 24],
     });
 
+    // Keep a copy of the raw Voronoi result as a fallback in case later
+    // FBM/noise filtering removes all pixels (so the user isn't left with
+    // an empty transparent result because of restrictive params).
+    const _voronoiCopy = new Uint8ClampedArray(data);
+
+    // Debug region variables (declared in outer scope so we can attach info after noise processing)
+    let debug_regionMap: Uint8Array | null = null;
+    let debug_regionW = 0;
+    let debug_regionH = 0;
+    let debug_regionCellW = 0;
+    let debug_regionCellH = 0;
+    let debug_buckets = 0;
+    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
+
     if (renderConfig?.crackUseNoise) {
         const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3, crackBandWidth: 0.012, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
         const baseScale = noiseCfg.baseScale || 1 / 480;
@@ -235,22 +313,30 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
         const strategy = noiseCfg.activeBucketStrategy || 'smallest';
         const regionSample = Math.max(16, Math.min(128, Math.floor(Math.min(width, height) / 6) || 16));
-        const regionW = Math.max(1, Math.floor(width / regionSample));
-        const regionH = Math.max(1, Math.floor(height / regionSample));
-        const regionNoise = new Noise(seed || 1);
-        const regionMap = new Uint8Array(regionW * regionH);
-        const counts = new Array<number>(buckets).fill(0);
-        for (let ry = 0; ry < regionH; ry++) {
-            for (let rx = 0; rx < regionW; rx++) {
-                const sampleX = ((rx + 0.5) / regionW) * width;
-                const sampleY = ((ry + 0.5) / regionH) * height;
+        debug_regionW = Math.max(1, Math.floor(width / regionSample));
+        debug_regionH = Math.max(1, Math.floor(height / regionSample));
+    const regionNoise = new Noise(seed || 1);
+    debug_regionMap = new Uint8Array(debug_regionW * debug_regionH);
+    const counts = new Array<number>(buckets).fill(0);
+        for (let ry = 0; ry < debug_regionH; ry++) {
+            for (let rx = 0; rx < debug_regionW; rx++) {
+                const sampleX = ((rx + 0.5) / debug_regionW) * width;
+                const sampleY = ((ry + 0.5) / debug_regionH) * height;
                 const screenPt = { x: sampleX + minX, y: sampleY + minY };
-                const worldPt = isoToWorld(screenPt);
+                // In isometric mode other overlays (NoiseZoning) sample noise using
+                // projected/screen coordinates (they map canvas pixels -> scene using
+                // cameraX/cameraY/zoom). To keep behavior consistent and ensure the
+                // FBM area follows zoom/pan, when renderConfig indicates isometric
+                // mode we sample directly in projected coordinates. For non-
+                // isometric mode fall back to the provided isoToWorld mapping.
+                const worldPt = (renderConfig && renderConfig.mode === 'isometric')
+                    ? { x: screenPt.x, y: screenPt.y }
+                    : isoToWorld(screenPt);
                 const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
                 let id = Math.floor(v * buckets);
                 if (id < 0) id = 0;
                 if (id >= buckets) id = buckets - 1;
-                regionMap[ry * regionW + rx] = id;
+                debug_regionMap![ry * debug_regionW + rx] = id;
                 counts[id]++;
             }
         }
@@ -278,12 +364,27 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         } else {
             picked = stats.slice().sort((a, b) => a.c - b.c).slice(0, maxActive);
         }
-        const activeBuckets = new Set<number>(picked.map(p => p.i));
+        let activeBuckets = new Set<number>(picked.map(p => p.i));
         if (activeBuckets.size === 0) {
             for (let b = 0; b < buckets; b++) activeBuckets.add(b);
         }
 
-        const bucketNoise: Noise[] = new Array(buckets);
+        // Allow callers to explicitly force which bucket ids are active by
+        // providing `renderConfig.forceActiveBucketIds` (array of numbers).
+        if (renderConfig && Array.isArray((renderConfig as any).forceActiveBucketIds) && (renderConfig as any).forceActiveBucketIds.length > 0) {
+            try {
+                const forced = new Set<number>();
+                for (const v of (renderConfig as any).forceActiveBucketIds) {
+                    const n = Number(v);
+                    if (isFinite(n) && n >= 0 && n < buckets) forced.add(Math.floor(n));
+                }
+                if (forced.size > 0) activeBuckets = forced;
+            } catch (e) {
+                // ignore malformed input
+            }
+        }
+
+    const bucketNoise: Noise[] = new Array(buckets);
         const bucketCenters: number[] = new Array(buckets);
         const fineScales: number[] = new Array(buckets);
         for (let b = 0; b < buckets; b++) {
@@ -292,9 +393,37 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             fineScales[b] = baseScale * (1.5 + b * 0.6);
         }
 
-        const invQuality = 1 / quality;
-        const regionCellW = regionW > 0 ? width / regionW : width;
-        const regionCellH = regionH > 0 ? height / regionH : height;
+    const invQuality = 1 / quality;
+    debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
+    debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
+    debug_buckets = buckets;
+        // Pre-generate an FBM mask at the original render resolution (width x height)
+        // and sample it per-canvas pixel. This avoids subtle coordinate mismatches
+        // between canvas-res sampling and the coarse region map used below.
+        let fbmMaskFull: Uint8Array | null = null;
+        try {
+            fbmMaskFull = generateFbmMask({
+                width: width,
+                height: height,
+                minX,
+                minY,
+                seed,
+                baseScale,
+                octaves,
+                lacunarity,
+                gain,
+                buckets,
+                maxActiveBuckets: noiseCfg.maxActiveBuckets,
+                activeBucketStrategy: noiseCfg.activeBucketStrategy,
+                crackBandWidth: noiseCfg.crackBandWidth,
+                mode: renderConfig?.mode === 'isometric' ? 'isometric' : 'normal',
+                isoToWorld,
+            });
+        } catch (e) {
+            // If mask generation fails, fall back to no mask (null)
+            fbmMaskFull = null;
+        }
+
         for (let y = 0; y < canvasH; y++) {
             for (let x = 0; x < canvasW; x++) {
                 const idx = (y * canvasW + x) * 4;
@@ -302,15 +431,29 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 if (alpha === 0) continue;
                 const screenX = (x + 0.5) * invQuality;
                 const screenY = (y + 0.5) * invQuality;
-                const rx = Math.max(0, Math.min(regionW - 1, Math.floor(screenX / (regionCellW || 1))));
-                const ry = Math.max(0, Math.min(regionH - 1, Math.floor(screenY / (regionCellH || 1))));
-                const bucketId = regionMap[ry * regionW + rx];
+                // If we have a full-resolution FBM mask, sample it in screen coords
+                // (mask was generated at original `width`/`height`). If mask says
+                // 'blocked', clear alpha and skip per-bucket checks.
+                if (fbmMaskFull) {
+                    const mx = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
+                    const my = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
+                    if (fbmMaskFull[my * width + mx] === 0) {
+                        data[idx + 3] = 0;
+                        continue;
+                    }
+                }
+                const rx = Math.max(0, Math.min(debug_regionW - 1, Math.floor(screenX / (debug_regionCellW || 1))));
+                const ry = Math.max(0, Math.min(debug_regionH - 1, Math.floor(screenY / (debug_regionCellH || 1))));
+                const bucketId = debug_regionMap![ry * debug_regionW + rx];
                 if (!activeBuckets.has(bucketId)) {
                     data[idx + 3] = 0;
                     continue;
                 }
                 const noiseInst = bucketNoise[bucketId];
-                const worldPt = isoToWorld({ x: screenX + minX, y: screenY + minY });
+                const samplePt = { x: screenX + minX, y: screenY + minY };
+                const worldPt = (renderConfig && renderConfig.mode === 'isometric')
+                    ? { x: samplePt.x, y: samplePt.y }
+                    : isoToWorld(samplePt);
                 const baseVal = fbmNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
                 const dist = Math.abs(baseVal - bucketCenters[bucketId]);
                 if (dist > crackBandWidth) {
@@ -326,11 +469,35 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     data[idx + 3] = 0;
                 } else {
                     data[idx + 3] = newAlpha;
-                    data[idx] = 24;
-                    data[idx + 1] = 24;
-                    data[idx + 2] = 24;
+                    // Paleta simples para buckets: cores bem distintas
+                    const palette = [
+                        [220, 38, 38],    // vermelho
+                        [34, 197, 94],    // verde
+                        [37, 99, 235],    // azul
+                        [234, 179, 8],    // amarelo
+                        [168, 85, 247],   // roxo
+                        [16, 185, 129],   // teal
+                        [251, 191, 36],   // laranja
+                        [244, 63, 94],    // rosa
+                    ];
+                    const color = palette[bucketId % palette.length];
+                    data[idx] = color[0];
+                    data[idx + 1] = color[1];
+                    data[idx + 2] = color[2];
                 }
             }
+        }
+        // After applying FBM filtering, ensure we didn't zero-out entire image
+        let any = false;
+        for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] > 0) { any = true; break; }
+        }
+        if (!any) {
+            // Restore the original Voronoi image and warn so user can adjust
+            if (typeof console !== 'undefined' && console.warn) {
+                console.warn('[crackGenerator] FBM filters removed all pixels; restoring fallback Voronoi image. Try loosening crackNoiseParams (crackBandWidth, maxActiveBuckets, buckets) or change seed.');
+            }
+            data.set(_voronoiCopy);
         }
     } else {
         for (let i = 0; i < data.length; i += 4) {
@@ -342,5 +509,20 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         }
     }
 
-    return { data, width: canvasW, height: canvasH, quality, color: [24, 24, 24] };
+    const out: CrackRaster = { data, width: canvasW, height: canvasH, quality, color: [24, 24, 24] };
+    if (attachDebugRegionRequested && debug_regionMap) {
+        out.debugRegion = {
+            map: debug_regionMap,
+            w: debug_regionW,
+            h: debug_regionH,
+            buckets: debug_buckets,
+            cellW: debug_regionCellW,
+            cellH: debug_regionCellH,
+            minX,
+            minY,
+            quality,
+        };
+    }
+
+    return out;
 }
