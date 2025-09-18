@@ -1,8 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-
-function setPixel(data: Uint8ClampedArray, idx: number, r: number, g: number, b: number, a = 255) {
-    data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = a;
-}
+import { Noise } from 'noisejs';
+import { config } from '../game_modules/config';
+import { generateVoronoiCrackImage } from '../tools/crackGenerator';
 // (clean) continued implementation follows
 
 const DEFAULT_WIDTH = 512;
@@ -27,13 +26,136 @@ const CracksPreview: React.FC<CracksPreviewProps> = ({ width = DEFAULT_WIDTH, he
     const [applyTarget, setApplyTarget] = useState<ApplyTarget>('road');
     const [dilateRadius, setDilateRadius] = useState<number>(2); // pixels to expand edges (helps cover curves)
 
-    // small helper RNG (deterministic by seed)
-    function makeRng(s: number) {
-        let t = s >>> 0;
-        return () => { t = (t * 1664525 + 1013904223) >>> 0; return t / 0x100000000; };
+    // Generate an image canvas for given scale multiplier. This is self-contained so we can produce high-res canvases.
+    const fbmNoise = (noise: Noise, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5) => {
+        let freq = 1;
+        let amp = 1;
+        let sum = 0;
+        let norm = 0;
+        for (let i = 0; i < octaves; i++) {
+            sum += noise.perlin2(x * freq, y * freq) * amp;
+            norm += amp;
+            freq *= lacunarity;
+            amp *= gain;
+        }
+        return (sum / (norm || 1)) * 0.5 + 0.5;
+    };
+
+    function applyNoiseMask(data: Uint8ClampedArray, canvasW: number, canvasH: number, seed: number) {
+        const renderCfg = (config as any).render || {};
+        if (!renderCfg.crackUseNoise) {
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i + 3] > 0) {
+                    data[i] = 24;
+                    data[i + 1] = 24;
+                    data[i + 2] = 24;
+                }
+            }
+            return;
+        }
+
+        const noiseCfg = renderCfg.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3, crackBandWidth: 0.012, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
+        const baseScale = noiseCfg.baseScale || 1 / 480;
+        const octaves = noiseCfg.octaves || 4;
+        const lacunarity = noiseCfg.lacunarity || 2;
+        const gain = noiseCfg.gain || 0.5;
+        const buckets = Math.max(1, Math.min(8, noiseCfg.buckets || 3));
+        const crackBandWidth = Math.max(0.002, Math.min(0.1, noiseCfg.crackBandWidth || 0.012));
+        const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
+        const strategy = noiseCfg.activeBucketStrategy || 'smallest';
+        const regionSample = Math.max(16, Math.min(128, Math.floor(Math.min(canvasW, canvasH) / 6) || 16));
+        const regionW = Math.max(1, Math.floor(canvasW / regionSample));
+        const regionH = Math.max(1, Math.floor(canvasH / regionSample));
+        const regionNoise = new Noise(seed || 1);
+        const regionMap = new Uint8Array(regionW * regionH);
+        const counts = new Array<number>(buckets).fill(0);
+        for (let ry = 0; ry < regionH; ry++) {
+            for (let rx = 0; rx < regionW; rx++) {
+                const sampleX = ((rx + 0.5) / regionW) * canvasW;
+                const sampleY = ((ry + 0.5) / regionH) * canvasH;
+                const v = fbmNoise(regionNoise, sampleX * baseScale, sampleY * baseScale, octaves, lacunarity, gain);
+                let id = Math.floor(v * buckets);
+                if (id < 0) id = 0;
+                if (id >= buckets) id = buckets - 1;
+                regionMap[ry * regionW + rx] = id;
+                counts[id]++;
+            }
+        }
+
+        const stats = counts.map((c, i) => ({ i, c }));
+        let picked: { i: number; c: number }[] = [];
+        if (strategy === 'largest') {
+            picked = stats.slice().sort((a, b) => b.c - a.c).slice(0, maxActive);
+        } else if (strategy === 'random') {
+            const rng = (() => {
+                let t = (seed ^ 0x9E3779B9) >>> 0;
+                return () => { t = (t * 1664525 + 1013904223) >>> 0; return t / 0x100000000; };
+            })();
+            const arr = stats.slice();
+            for (let i = arr.length - 1; i > 0; i--) {
+                const j = Math.floor(rng() * (i + 1));
+                const tmp = arr[i];
+                arr[i] = arr[j];
+                arr[j] = tmp;
+            }
+            picked = arr.slice(0, maxActive);
+        } else {
+            picked = stats.slice().sort((a, b) => a.c - b.c).slice(0, maxActive);
+        }
+        const activeBuckets = new Set<number>(picked.map(p => p.i));
+        if (activeBuckets.size === 0) {
+            for (let b = 0; b < buckets; b++) activeBuckets.add(b);
+        }
+
+        const bucketNoise: Noise[] = new Array(buckets);
+        const bucketCenters: number[] = new Array(buckets);
+        const fineScales: number[] = new Array(buckets);
+        for (let b = 0; b < buckets; b++) {
+            bucketNoise[b] = new Noise(seed + b * 97 + 13);
+            bucketCenters[b] = (b + 0.5) / buckets;
+            fineScales[b] = baseScale * (1.5 + b * 0.6);
+        }
+
+        const regionCellW = regionW > 0 ? canvasW / regionW : canvasW;
+        const regionCellH = regionH > 0 ? canvasH / regionH : canvasH;
+        for (let y = 0; y < canvasH; y++) {
+            for (let x = 0; x < canvasW; x++) {
+                const idx = (y * canvasW + x) * 4;
+                const alpha = data[idx + 3];
+                if (alpha === 0) continue;
+                const screenX = x + 0.5;
+                const screenY = y + 0.5;
+                const rx = Math.max(0, Math.min(regionW - 1, Math.floor(screenX / (regionCellW || 1))));
+                const ry = Math.max(0, Math.min(regionH - 1, Math.floor(screenY / (regionCellH || 1))));
+                const bucketId = regionMap[ry * regionW + rx];
+                if (!activeBuckets.has(bucketId)) {
+                    data[idx + 3] = 0;
+                    continue;
+                }
+                const noiseInst = bucketNoise[bucketId];
+                const baseVal = fbmNoise(noiseInst, screenX * baseScale, screenY * baseScale, octaves, lacunarity, gain);
+                const dist = Math.abs(baseVal - bucketCenters[bucketId]);
+                if (dist > crackBandWidth) {
+                    data[idx + 3] = 0;
+                    continue;
+                }
+                const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
+                const edgeSoft = Math.pow(edge, 1.2);
+                const fine = fbmNoise(noiseInst, screenX * fineScales[bucketId] * 3.0, screenY * fineScales[bucketId] * 3.0, 2, 2, 0.6);
+                const modulation = Math.max(0, Math.min(1, edgeSoft * (0.35 + 0.65 * fine)));
+                const newAlpha = Math.round(alpha * modulation);
+                if (newAlpha < 12) {
+                    data[idx + 3] = 0;
+                } else {
+                    data[idx + 3] = newAlpha;
+                    data[idx] = 24;
+                    data[idx + 1] = 24;
+                    data[idx + 2] = 24;
+                }
+            }
+        }
     }
 
-    // Generate an image canvas for given scale multiplier. This is self-contained so we can produce high-res canvases.
     function generateCanvas(scale = 1): HTMLCanvasElement {
         const sw = Math.max(1, Math.round(width * scale));
         const sh = Math.max(1, Math.round(height * scale));
@@ -41,100 +163,17 @@ const CracksPreview: React.FC<CracksPreviewProps> = ({ width = DEFAULT_WIDTH, he
         canvas.width = sw; canvas.height = sh;
         const ctx = canvas.getContext('2d');
         if (!ctx) return canvas;
-
-        const n = Math.max(8, Math.min(1500, Math.round(divisions)));
-        const rng = makeRng(seed);
-        const pts = new Float32Array(n * 2);
-        for (let i = 0; i < n; i++) { pts[2 * i] = rng() * sw; pts[2 * i + 1] = rng() * sh; }
-
-        // grid acceleration
-        const cellsPerDim = Math.max(8, Math.round(Math.sqrt(n)));
-        const cellSize = sw / cellsPerDim;
-        const gx = cellsPerDim, gy = cellsPerDim;
-        const grid: number[][] = new Array(gx * gy);
-        for (let i = 0; i < grid.length; i++) grid[i] = [];
-        for (let i = 0; i < n; i++) {
-            const x = pts[2 * i], y = pts[2 * i + 1];
-            const cx = Math.min(gx - 1, Math.max(0, Math.floor(x / cellSize)));
-            const cy = Math.min(gy - 1, Math.max(0, Math.floor(y / cellSize)));
-            grid[cy * gx + cx].push(i);
-        }
-
-        function candidatesLocal(x: number, y: number) {
-            const cx = Math.min(gx - 1, Math.max(0, Math.floor(x / cellSize)));
-            const cy = Math.min(gy - 1, Math.max(0, Math.floor(y / cellSize)));
-            let out: number[] = [];
-            for (let r = 1; r <= 2; r++) {
-                out.length = 0;
-                for (let j = cy - r; j <= cy + r; j++) {
-                    if (j < 0 || j >= gy) continue;
-                    for (let i = cx - r; i <= cx + r; i++) {
-                        if (i < 0 || i >= gx) continue;
-                        const arr = grid[j * gx + i];
-                        if (arr && arr.length) out.push(...arr);
-                    }
-                }
-                if (out.length || r === 2) return out;
-            }
-            return out;
-        }
-
+        const pixels = generateVoronoiCrackImage(sw, sh, {
+            divisions,
+            thickness,
+            dilateRadius,
+            seed,
+            scale,
+            color: EDGE_COLOR as [number, number, number],
+        });
+        applyNoiseMask(pixels, sw, sh, seed);
         const img = ctx.createImageData(sw, sh);
-        const d = img.data;
-        const eps = (thickness / 10) * scale; // scale thickness proportionally
-
-        for (let y = 0; y < sh; y++) {
-            for (let x = 0; x < sw; x++) {
-                const cand = candidatesLocal(x, y);
-                let b1 = Infinity, b2 = Infinity;
-                if (cand && cand.length) {
-                    for (let k = 0; k < cand.length; k++) {
-                        const i = cand[k];
-                        const dx = x - pts[2 * i];
-                        const dy = y - pts[2 * i + 1];
-                        const dist2 = dx * dx + dy * dy;
-                        if (dist2 < b1) { b2 = b1; b1 = dist2; }
-                        else if (dist2 < b2) { b2 = dist2; }
-                    }
-                } else {
-                    for (let i = 0; i < n; i++) {
-                        const dx = x - pts[2 * i];
-                        const dy = y - pts[2 * i + 1];
-                        const dist2 = dx * dx + dy * dy;
-                        if (dist2 < b1) { b2 = b1; b1 = dist2; }
-                        else if (dist2 < b2) { b2 = dist2; }
-                    }
-                }
-                const delta = Math.sqrt(b2) - Math.sqrt(b1);
-                const p = (y * sw + x) * 4;
-                if (delta < eps) { d[p] = EDGE_COLOR[0]; d[p + 1] = EDGE_COLOR[1]; d[p + 2] = EDGE_COLOR[2]; d[p + 3] = 255; }
-                else { d[p] = 0; d[p + 1] = 0; d[p + 2] = 0; d[p + 3] = 0; }
-            }
-        }
-
-        // dilation to cover curves/rounded areas
-        const radius = Math.max(0, Math.min(20, Math.round(dilateRadius * scale)));
-        if (radius > 0) {
-            const copy = new Uint8ClampedArray(d.length);
-            copy.set(d);
-            const w = sw, h = sh;
-            for (let y = 0; y < h; y++) {
-                for (let x = 0; x < w; x++) {
-                    const idx = (y * w + x) * 4;
-                    if (copy[idx + 3] === 0) continue;
-                    // expand
-                    const x0 = Math.max(0, x - radius), x1 = Math.min(w - 1, x + radius);
-                    const y0 = Math.max(0, y - radius), y1 = Math.min(h - 1, y + radius);
-                    for (let yy = y0; yy <= y1; yy++) {
-                        for (let xx = x0; xx <= x1; xx++) {
-                            const ii = (yy * w + xx) * 4;
-                            d[ii] = EDGE_COLOR[0]; d[ii + 1] = EDGE_COLOR[1]; d[ii + 2] = EDGE_COLOR[2]; d[ii + 3] = 255;
-                        }
-                    }
-                }
-            }
-        }
-
+        img.data.set(pixels);
         ctx.putImageData(img, 0, 0);
         return canvas;
     }
