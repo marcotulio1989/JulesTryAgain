@@ -16,6 +16,90 @@ import NoiseZoning from '../overlays/NoiseZoning';
 import { createGrassTexture } from '../overlays/grassTexture';
 import Quadtree from '../lib/quadtree';
 import { generateCrackRaster, CrackRaster } from '../tools/crackGenerator';
+
+type XY = { x: number; y: number };
+
+interface LocalPolygon {
+    points: XY[];
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+}
+
+const pointInPolygon = (px: number, py: number, polygon: XY[]): boolean => {
+    if (polygon.length < 3) return false;
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = polygon[i].x;
+        const yi = polygon[i].y;
+        const xj = polygon[j].x;
+        const yj = polygon[j].y;
+        const intersect = ((yi > py) !== (yj > py)) && (px < ((xj - xi) * (py - yi)) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+};
+
+const buildCrashMask = (raster: CrackRaster, polygons: XY[][], originX: number, originY: number): Uint8Array | null => {
+    if (!polygons.length || raster.width <= 0 || raster.height <= 0) return null;
+
+    const localPolys: LocalPolygon[] = [];
+    for (const poly of polygons) {
+        if (!poly || poly.length < 3) continue;
+        const pts: XY[] = [];
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const p of poly) {
+            const lx = p.x - originX;
+            const ly = p.y - originY;
+            pts.push({ x: lx, y: ly });
+            if (lx < minX) minX = lx;
+            if (ly < minY) minY = ly;
+            if (lx > maxX) maxX = lx;
+            if (ly > maxY) maxY = ly;
+        }
+        if (pts.length >= 3 && Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+            localPolys.push({ points: pts, minX, minY, maxX, maxY });
+        }
+    }
+
+    if (localPolys.length === 0) return null;
+
+    const invQuality = raster.quality > 0 ? (1 / raster.quality) : 1;
+    const fbmMask = raster.fbmMask;
+    const fbmData = fbmMask?.data ?? null;
+    const fbmW = fbmMask?.width ?? 0;
+    const fbmH = fbmMask?.height ?? 0;
+
+    const mask = new Uint8Array(raster.width * raster.height);
+    for (let y = 0; y < raster.height; y++) {
+        const sampleY = (y + 0.5) * invQuality;
+        for (let x = 0; x < raster.width; x++) {
+            const sampleX = (x + 0.5) * invQuality;
+            if (fbmData) {
+                const mx = Math.max(0, Math.min(fbmW - 1, Math.floor(sampleX)));
+                const my = Math.max(0, Math.min(fbmH - 1, Math.floor(sampleY)));
+                if (fbmData[my * fbmW + mx] === 0) continue;
+            }
+            let inside = false;
+            for (const poly of localPolys) {
+                if (sampleX < poly.minX || sampleX > poly.maxX || sampleY < poly.minY || sampleY > poly.maxY) continue;
+                if (pointInPolygon(sampleX, sampleY, poly.points)) {
+                    inside = true;
+                    break;
+                }
+            }
+            if (inside) {
+                mask[y * raster.width + x] = 255;
+            }
+        }
+    }
+
+    return mask;
+};
 // ClipperLib (sem typings completos) - usar require para acessar classes
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ClipperLib: any = require('clipper-lib');
@@ -1993,6 +2077,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
             const useProceduralCracks = !!renderCfg.crackUseProcedural;
             const textureFromProps = roadCrackTextureRef.current;
             const allowTexture = !!renderCfg.roadCrackUseTexture;
+            const crashMaskEnabled = !!renderCfg.crashMaskEnabled;
             const shouldRenderCracks = useProceduralCracks || (allowTexture && !!textureFromProps);
             try { console.debug('[GameCanvas] crack overlay -> procedural=', useProceduralCracks, 'hasTexture=', !!textureFromProps, 'allowTexture=', allowTexture); } catch (e) {}
             if (shouldRenderCracks) {
@@ -2068,6 +2153,26 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             isoToWorld,
                         });
                         if (raster) {
+                            if (crashMaskEnabled) {
+                                const crashMaskData = buildCrashMask(raster, polys, minX, minY);
+                                if (crashMaskData) {
+                                    const arr = raster.data;
+                                    for (let i = 0; i < crashMaskData.length; i++) {
+                                        if (crashMaskData[i] === 0) {
+                                            const idx = i * 4;
+                                            arr[idx + 3] = 0;
+                                        }
+                                    }
+                                    raster.crashMask = {
+                                        data: crashMaskData,
+                                        width: raster.width,
+                                        height: raster.height,
+                                        minX,
+                                        minY,
+                                        quality: raster.quality,
+                                    };
+                                }
+                            }
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
                             const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
