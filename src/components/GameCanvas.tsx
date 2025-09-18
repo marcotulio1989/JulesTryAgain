@@ -15,7 +15,7 @@ import type { Point } from '../generic_modules/math';
 import NoiseZoning from '../overlays/NoiseZoning';
 import { createGrassTexture } from '../overlays/grassTexture';
 import Quadtree from '../lib/quadtree';
-import { generateCrackRaster, CrackRaster } from '../tools/crackGenerator';
+import { generateCrackRaster, CrackRaster, RasterData } from '../tools/crackGenerator';
 // ClipperLib (sem typings completos) - usar require para acessar classes
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ClipperLib: any = require('clipper-lib');
@@ -68,6 +68,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     const roadLaneOverlay = useRef<PIXI.Container | null>(null);
     const roadLaneOutlines = useRef<PIXI.Container | null>(null);
     const edgeOverlay = useRef<PIXI.Container | null>(null);
+    const crashMaskOverlay = useRef<PIXI.Container | null>(null);
     const roadLaneTextureRef = useRef<PIXI.Texture | null>(roadLaneTexture || null);
     const roadCrackTextureRef = useRef<PIXI.Texture | null>(roadCrackTexture || null);
     const edgeTextureRef = useRef<PIXI.Texture | null>(edgeTexture || null);
@@ -142,7 +143,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         return { x: invA * p.x + invC * p.y, y: invB * p.x + invD * p.y };
     };
 
-    const rasterToGraphics = (raster: CrackRaster | null, spriteW: number, spriteH: number, alphaMultiplier: number): PIXI.Graphics | null => {
+    const rasterToGraphics = (raster: RasterData | null, spriteW: number, spriteH: number, alphaMultiplier: number): PIXI.Graphics | null => {
         if (!raster || raster.width <= 0 || raster.height <= 0) return null;
         const { data, width, height, color } = raster;
         if (!data || data.length === 0) return null;
@@ -1984,6 +1985,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         // Aplicar overlay de rachaduras nas vias se houver textura definida
         try {
             roadCrackOverlay.current?.removeChildren();
+            crashMaskOverlay.current?.removeChildren();
             if (proceduralCrackGraphicsRef.current) {
                 try { proceduralCrackGraphicsRef.current.destroy(true); } catch (e) {}
                 proceduralCrackGraphicsRef.current = null;
@@ -2041,22 +2043,29 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     maxX = Math.ceil(maxX) + padding;
                     maxY = Math.ceil(maxY) + padding;
 
-                    const maskG = new PIXI.Graphics();
-                    maskG.beginFill(0xFFFFFF);
-                    for (const poly of polys) {
-                        const local0 = { x: poly[0].x - minX, y: poly[0].y - minY };
-                        maskG.moveTo(local0.x, local0.y);
-                        for (let i = 1; i < poly.length; i++) {
-                            const lp = { x: poly[i].x - minX, y: poly[i].y - minY };
-                            maskG.lineTo(lp.x, lp.y);
+                    const buildMaskGraphics = () => {
+                        const g = new PIXI.Graphics();
+                        g.beginFill(0xFFFFFF);
+                        for (const poly of polys) {
+                            if (!poly.length) continue;
+                            const local0 = { x: poly[0].x - minX, y: poly[0].y - minY };
+                            g.moveTo(local0.x, local0.y);
+                            for (let i = 1; i < poly.length; i++) {
+                                const lp = { x: poly[i].x - minX, y: poly[i].y - minY };
+                                g.lineTo(lp.x, lp.y);
+                            }
+                            g.closePath();
                         }
-                        maskG.closePath();
-                    }
-                    maskG.endFill();
+                        g.endFill();
+                        return g;
+                    };
+
+                    const maskG = buildMaskGraphics();
 
                     const spriteW = Math.max(4, Math.ceil(maxX - minX));
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
                     let cracksDisplay: PIXI.DisplayObject | null = null;
+                    let rasterResult: CrackRaster | null = null;
 
                     if (useProceduralCracks) {
                         const raster = generateCrackRaster({
@@ -2067,6 +2076,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             renderConfig: renderCfg,
                             isoToWorld,
                         });
+                        rasterResult = raster;
                         if (raster) {
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
                             const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
@@ -2121,6 +2131,25 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         }
                         if (typeof roadCrackAlpha === 'number') sprite.alpha = roadCrackAlpha;
                         cracksDisplay = sprite;
+                    }
+
+                    if (renderCfg.crashMaskEnabled && rasterResult?.crashOverlay) {
+                        try {
+                            const crashGraphics = rasterToGraphics(rasterResult.crashOverlay, spriteW, spriteH, 1);
+                            if (crashGraphics) {
+                                crashGraphics.alpha = 0.9;
+                                const crashContainer = new PIXI.Container();
+                                crashContainer.x = minX;
+                                crashContainer.y = minY;
+                                crashGraphics.x = 0;
+                                crashGraphics.y = 0;
+                                crashContainer.addChild(crashGraphics);
+                                const crashMaskG = buildMaskGraphics();
+                                crashContainer.addChild(crashMaskG);
+                                crashContainer.mask = crashMaskG;
+                                crashMaskOverlay.current?.addChild(crashContainer);
+                            }
+                        } catch (e) {}
                     }
 
                     if (cracksDisplay) {
@@ -3102,6 +3131,8 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     roadCrackOverlay.current = new PIXI.Container();
     // crack overlay should sit below block edge bands so borders render on top
     (roadCrackOverlay.current as any).zIndex = 50;
+    crashMaskOverlay.current = new PIXI.Container();
+    (crashMaskOverlay.current as any).zIndex = 51;
     roadLaneOverlay.current = new PIXI.Container();
     // lane overlay should sit above lane outlines so marker texture appears above outlines, but still below crack overlay
     (roadLaneOverlay.current as any).zIndex = 41;
@@ -3139,6 +3170,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     drawables.current.addChild(edgeOverlay.current);
     // overlay de rachaduras acima do fill das ruas e abaixo das bandas/perfis
     drawables.current.addChild(roadCrackOverlay.current);
+    drawables.current.addChild(crashMaskOverlay.current);
     // faixa das vias (linhas/texture) - acima das rachaduras
     drawables.current.addChild(roadLaneOverlay.current);
     // linhas de contorno das faixas
