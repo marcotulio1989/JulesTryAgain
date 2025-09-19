@@ -1,6 +1,6 @@
 /*
  * NoiseZoning Overlay
- * Perlin/fBm-only zoning overlay for city generator
+ * Domain-warped simplex noise zoning overlay for city generator
  * API: attach(canvas), toggle(), reseed(), redraw()
  * Independent of roads/buildings
  */
@@ -8,22 +8,7 @@ import { ZoneName } from '../game_modules/mapgen';
 import { config } from '../game_modules/config';
 import Zoning from '../game_modules/zoning';
 import { Noise } from 'noisejs';
-
-// Simple Perlin noise implementation (can be replaced by external lib)
-function fbm(noise: Noise, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5): number {
-  let freq = 1;
-  let amp = 1;
-  let sum = 0;
-  let norm = 0;
-  for (let i = 0; i < octaves; i++) {
-    sum += noise.perlin2(x * freq, y * freq) * amp;
-    norm += amp;
-    freq *= lacunarity;
-    amp *= gain;
-  }
-  // Map from [-norm, norm] to [0,1]
-  return (sum / (norm || 1)) * 0.5 + 0.5;
-}
+import { warpedSimplexNoise } from '../tools/noiseSampler';
 
 
 export type NoiseZoningAPI = {
@@ -172,7 +157,7 @@ const NoiseZoning: InternalNoiseZoning = {
         // Mapear pixel -> coordenadas de cena, seguindo pan/zoom
         const Sx = cameraX + (x - cx) / zoom;
         const Sy = cameraY + (y - cy) / zoom;
-        const n = fbm(this._noise, Sx * baseScale, Sy * baseScale, octaves, lacunarity, gain);
+        const n = warpedSimplexNoise(this._noise, Sx * baseScale, Sy * baseScale, octaves, lacunarity, gain);
         let zone: ZoneName = 'residential';
         if (n < thresholds.r1) zone = 'rural';
         else if (n < thresholds.r2) zone = 'residential';
