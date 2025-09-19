@@ -400,55 +400,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             if (typeof console !== 'undefined' && console.warn) {
                 console.warn('[crackGenerator] Noise bucket filtering removed all pixels; restoring fallback Voronoi image. Try adjusting crackNoiseParams (buckets/maxActiveBuckets) or change seed.');
             }
-            let fallbackHits = 0;
-            for (let y = 0; y < canvasH; y++) {
-                for (let x = 0; x < canvasW; x++) {
-                    const idx = (y * canvasW + x) * 4;
-                    const srcAlpha = _voronoiCopy[idx + 3];
-                    if (srcAlpha === 0) {
-                        data[idx] = 0;
-                        data[idx + 1] = 0;
-                        data[idx + 2] = 0;
-                        data[idx + 3] = 0;
-                        continue;
-                    }
-                    const screenX = (x + 0.5) * invQuality;
-                    const screenY = (y + 0.5) * invQuality;
-                    const baseX = Math.max(0, Math.min(width - 1, Math.floor(screenX)));
-                    const baseY = Math.max(0, Math.min(height - 1, Math.floor(screenY)));
-                    const baseIndex = baseY * width + baseX;
-                    if (noiseMaskData && noiseMaskData[baseIndex] === 0) {
-                        data[idx] = 0;
-                        data[idx + 1] = 0;
-                        data[idx + 2] = 0;
-                        data[idx + 3] = 0;
-                        continue;
-                    }
-                    const bucketId = bucketAssignment ? bucketAssignment[baseIndex] : 0;
-                    if (!activeBuckets!.has(bucketId)) {
-                        data[idx] = 0;
-                        data[idx + 1] = 0;
-                        data[idx + 2] = 0;
-                        data[idx + 3] = 0;
-                        continue;
-                    }
-                    const maskAlpha = noiseMaskData ? Math.max(0, Math.min(1, noiseMaskData[baseIndex] / 255)) : 1;
-                    const finalAlpha = Math.max(0, Math.min(255, Math.round(srcAlpha * maskAlpha)));
-                    if (finalAlpha <= 0) {
-                        data[idx] = 0;
-                        data[idx + 1] = 0;
-                        data[idx + 2] = 0;
-                        data[idx + 3] = 0;
-                        continue;
-                    }
-                    data[idx] = _voronoiCopy[idx];
-                    data[idx + 1] = _voronoiCopy[idx + 1];
-                    data[idx + 2] = _voronoiCopy[idx + 2];
-                    data[idx + 3] = finalAlpha;
-                    fallbackHits++;
-                }
-            }
-            hasCoverage = fallbackHits > 0;
+            data.set(_voronoiCopy);
         }
     } else {
         for (let y = 0; y < canvasH; y++) {
