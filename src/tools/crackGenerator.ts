@@ -1,4 +1,5 @@
 import { Noise } from 'noisejs';
+import { sampleWarpedNoise } from '../lib/noiseField';
 
 export interface CrackGeneratorOptions {
     divisions: number;
@@ -16,18 +17,6 @@ function makeRng(seed: number) {
         return state / 0x100000000;
     };
 }
-
-export const fbmNoise = (
-    noise: Noise,
-    x: number,
-    y: number,
-    _octaves = 1,
-    _lacunarity = 2,
-    _gain = 0.5,
-) => {
-    const value = noise.perlin2(x, y);
-    return value * 0.5 + 0.5;
-};
 
 export function generateVoronoiCrackImage(width: number, height: number, options: CrackGeneratorOptions): Uint8ClampedArray {
     const sw = Math.max(1, Math.round(width));
@@ -160,7 +149,7 @@ export interface CrackRaster {
     height: number;
     quality: number;
     color: [number, number, number];
-    // Optional debug info for noise bucket region visualization (legacy FBM naming)
+    // Optional debug info for noise bucket region visualization (legacy naming kept for backwards compatibility)
     debugRegion?: {
         map: Uint8Array;
         w: number;
@@ -171,8 +160,17 @@ export interface CrackRaster {
         minX: number;
         minY: number;
         quality: number;
+        activeBucketIds?: number[];
     };
     crashMask?: {
+        data: Uint8Array;
+        width: number;
+        height: number;
+        minX: number;
+        minY: number;
+        quality: number;
+    };
+    noiseMask?: {
         data: Uint8Array;
         width: number;
         height: number;
@@ -240,11 +238,11 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         if (typeof console !== 'undefined' && console.warn) {
             console.warn('[crackGenerator] Procedural crack raster skipped – area too large after clamping', { canvasW, canvasH, quality });
         }
-        // If the caller explicitly requested legacy FBM debug delimitations, return a
+        // If the caller explicitly requested legacy noise debug delimitations, return a
         // tiny placeholder raster that includes a coarse `debugRegion` so the
         // UI can still visualize noise buckets even when the full raster is
         // skipped due to clamping limits.
-    if (renderConfig?.showFbmDelimitations && renderConfig?.crackUseNoise) {
+    if (renderConfig?.showNoiseDelimitations && renderConfig?.crackUseNoise) {
             try {
                 const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
                 const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3 };
@@ -265,7 +263,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                         const worldPt = (renderConfig && renderConfig.mode === 'isometric')
                             ? { x: screenPt.x, y: screenPt.y }
                             : isoToWorld(screenPt);
-                        const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                        const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
                         let id = Math.floor(v * buckets);
                         if (id < 0) id = 0;
                         if (id >= buckets) id = buckets - 1;
@@ -321,7 +319,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_regionCellW = 0;
     let debug_regionCellH = 0;
     let debug_buckets = 0;
-    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
+    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showNoiseDelimitations);
     let debugMaskData: Uint8Array | null = null;
     if (debugMask && debugMask.data) {
         if (debugMask.width === width && debugMask.height === height) {
@@ -337,10 +335,15 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let crashMaskCount = 0;
     let activeBuckets: Set<number> | null = null;
     let sampleBucketId: ((screenX: number, screenY: number) => number) | null = null;
+    let noiseMaskData: Uint8Array | null = null;
+    let bucketCoverage: number[] | null = null;
 
     if (renderConfig?.crackUseNoise) {
         const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, buckets: 3, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
         const baseScale = noiseCfg.baseScale || 1 / 480;
+        const octaves = noiseCfg.octaves || 4;
+        const lacunarity = noiseCfg.lacunarity || 2;
+        const gain = noiseCfg.gain || 0.5;
         const buckets = Math.max(1, Math.min(8, noiseCfg.buckets || 3));
         const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
         const strategy = noiseCfg.activeBucketStrategy || 'smallest';
@@ -365,7 +368,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 const worldPt = (renderConfig && renderConfig.mode === 'isometric')
                     ? { x: screenPt.x, y: screenPt.y }
                     : isoToWorld(screenPt);
-                const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale);
+                const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
                 let id = Math.floor(v * buckets);
                 if (id < 0) id = 0;
                 if (id >= buckets) id = buckets - 1;
@@ -458,6 +461,18 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             return debug_regionMap![ry * debug_regionW + rx];
         };
 
+        const crackBandWidth = Math.max(0.0005, Math.min(0.25, Number(noiseCfg.crackBandWidth) || 0.012));
+        noiseMaskData = new Uint8Array(width * height);
+        bucketCoverage = new Array<number>(buckets).fill(0);
+        const bucketNoise: Noise[] = new Array(buckets);
+        const bucketCenters: number[] = new Array(buckets);
+        const fineScales: number[] = new Array(buckets);
+        for (let b = 0; b < buckets; b++) {
+            bucketNoise[b] = new Noise((seed + b * 97 + 13) >>> 0);
+            bucketCenters[b] = (b + 0.5) / buckets;
+            fineScales[b] = baseScale * (1.35 + b * 0.55);
+        }
+
         const palette = [
             [220, 38, 38],    // vermelho
             [34, 197, 94],    // verde
@@ -488,23 +503,49 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     data[idx + 3] = 0;
                     continue;
                 }
+                const samplePt = { x: screenX + minX, y: screenY + minY };
+                const worldPt = (renderConfig && renderConfig.mode === 'isometric')
+                    ? { x: samplePt.x, y: samplePt.y }
+                    : isoToWorld(samplePt);
+                const noiseInst = bucketNoise[bucketId];
+                const baseVal = sampleWarpedNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                const dist = Math.abs(baseVal - bucketCenters[bucketId]);
+                if (dist > crackBandWidth) {
+                    data[idx + 3] = 0;
+                    continue;
+                }
+                const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
+                const fineVal = sampleWarpedNoise(
+                    noiseInst,
+                    worldPt.x * fineScales[bucketId] * 3.0,
+                    worldPt.y * fineScales[bucketId] * 3.0,
+                    2,
+                    2,
+                    0.6,
+                );
+                const modulation = Math.max(0, Math.min(1, Math.pow(edge, 1.2) * (0.35 + 0.65 * fineVal)));
+                if (modulation <= 0.03) {
+                    data[idx + 3] = 0;
+                    continue;
+                }
+                const finalAlpha = Math.min(255, Math.max(0, Math.round(alpha * modulation)));
+                if (finalAlpha <= 0) {
+                    data[idx + 3] = 0;
+                    continue;
+                }
                 const color = palette[bucketId % palette.length];
                 data[idx] = color[0];
                 data[idx + 1] = color[1];
                 data[idx + 2] = color[2];
+                data[idx + 3] = finalAlpha;
                 hasCoverage = true;
-            }
-        }
-        if (crashMaskData) {
-            for (let y = 0; y < height; y++) {
-                for (let x = 0; x < width; x++) {
-                    const baseIndex = y * width + x;
-                    if (debugMaskData && debugMaskData[baseIndex] === 0) continue;
-                    const bucketId = sampleBucketId!(x + 0.5, y + 0.5);
-                    if (activeBuckets!.has(bucketId) && crashMaskData[baseIndex] === 0) {
-                        crashMaskData[baseIndex] = 255;
-                        crashMaskCount++;
-                    }
+                if (noiseMaskData && noiseMaskData[baseIndex] === 0) {
+                    noiseMaskData[baseIndex] = 255;
+                    if (bucketCoverage) bucketCoverage[bucketId] = (bucketCoverage[bucketId] || 0) + 1;
+                }
+                if (crashMaskData && crashMaskData[baseIndex] === 0) {
+                    crashMaskData[baseIndex] = 255;
+                    crashMaskCount++;
                 }
             }
         }
@@ -514,6 +555,20 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     crashMaskData[i] = 255;
                     crashMaskCount++;
                 }
+            }
+        }
+        if (renderConfig && typeof renderConfig === 'object') {
+            try {
+                const detected: Record<number, number> = {};
+                if (bucketCoverage) {
+                    for (let i = 0; i < bucketCoverage.length; i++) {
+                        if (bucketCoverage[i] > 0) detected[i] = bucketCoverage[i];
+                    }
+                }
+                (renderConfig as any).detectedNoiseBuckets = detected;
+                (renderConfig as any).activeNoiseBuckets = activeBuckets ? Array.from(activeBuckets) : [];
+            } catch (e) {
+                // ignore assignment errors
             }
         }
         if (!hasCoverage) {
@@ -563,6 +618,15 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     }
                 }
             }
+            if (noiseMaskData) {
+                if (debugMaskData) {
+                    for (let i = 0; i < debugMaskData.length; i++) {
+                        noiseMaskData[i] = debugMaskData[i] !== 0 ? 255 : 0;
+                    }
+                } else {
+                    noiseMaskData.fill(255);
+                }
+            }
         }
     } else {
         for (let y = 0; y < canvasH; y++) {
@@ -597,11 +661,22 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             minX,
             minY,
             quality,
+            activeBucketIds: activeBuckets ? Array.from(activeBuckets) : undefined,
         };
     }
     if (crashMaskData) {
         out.crashMask = {
             data: crashMaskData,
+            width,
+            height,
+            minX,
+            minY,
+            quality,
+        };
+    }
+    if (noiseMaskData) {
+        out.noiseMask = {
+            data: noiseMaskData,
             width,
             height,
             minX,
