@@ -239,10 +239,14 @@ const App: React.FC = () => {
     const activeBucketsForDisplay = Math.max(1, Math.min(bucketsForDisplay, Math.round(1 + crackAreaCoverage * (bucketsForDisplay - 1))));
     const coveragePercent = Math.round((activeBucketsForDisplay / bucketsForDisplay) * 100);
     const coverageLabel = coveragePercent <= 33 ? 'Baixa' : (coveragePercent >= 67 ? 'Alta' : 'Média');
-    const baseBandDisplay = noiseDefaults.crackBandWidth || 0.008;
-    const minBandDisplay = Math.max(0.001, baseBandDisplay * 0.5);
-    const maxBandDisplay = Math.min(0.05, baseBandDisplay * 2.5);
-    const displayBandWidth = minBandDisplay + (maxBandDisplay - minBandDisplay) * crackAreaCoverage;
+    const baseBandDisplay = noiseDefaults.crackBandWidth || 0.012;
+    const minBandDisplay = Math.max(0.0005, baseBandDisplay * 0.35);
+    const maxBandDisplay = Math.min(0.2, baseBandDisplay * 12);
+    const coverageForBand = Math.pow(Math.min(1, Math.max(0, crackAreaCoverage)), 0.85);
+    const displayBandWidth = minBandDisplay + (maxBandDisplay - minBandDisplay) * coverageForBand;
+    const displayBandWidthLabel = displayBandWidth >= 0.1
+        ? displayBandWidth.toFixed(2)
+        : displayBandWidth.toFixed(3);
     const [edgeScale, setEdgeScale] = useState<number>(() => safeLoadNumber('edgeScale', (config as any).render.edgeTextureScale || 1.0));
     const [edgeAlpha, setEdgeAlpha] = useState<number>(() => safeLoadNumber('edgeAlpha', (config as any).render.edgeTextureAlpha ?? 1.0));
     // controls for road lane overlay
@@ -359,10 +363,11 @@ const App: React.FC = () => {
         const buckets = Math.max(1, defaults.buckets || params.buckets || 3);
         const coverage = Math.min(1, Math.max(0, crackAreaCoverage));
         const activeCount = Math.max(1, Math.min(buckets, Math.round(1 + coverage * (buckets - 1))));
-        const baseBand = defaults.crackBandWidth || 0.008;
-        const minBand = Math.max(0.001, baseBand * 0.5);
-        const maxBand = Math.min(0.05, baseBand * 2.5);
-        const computedBand = minBand + (maxBand - minBand) * coverage;
+        const baseBand = defaults.crackBandWidth || 0.012;
+        const minBand = Math.max(0.0005, baseBand * 0.35);
+        const maxBand = Math.min(0.2, baseBand * 12);
+        const coverageForBand = Math.pow(Math.min(1, Math.max(0, coverage)), 0.85);
+        const computedBand = minBand + (maxBand - minBand) * coverageForBand;
         const nextParams = {
             ...params,
             baseScale: defaults.baseScale,
@@ -787,7 +792,7 @@ const App: React.FC = () => {
                 <div style={{ display: 'inline-block', marginLeft: 12, padding: '6px', border: '1px solid #444', borderRadius: 6 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Crack Noise</div>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar fBm para delimitar
+                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar ruído distorcido para delimitar
                     </label>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                         <input type="checkbox" checked={crashMaskEnabled} onChange={(e) => setCrashMaskEnabled(e.target.checked)} /> Aplicar Crash Mask (apenas nas vias)
@@ -812,7 +817,7 @@ const App: React.FC = () => {
                             <span style={{ fontSize: 11, opacity: 0.7 }}>Mais</span>
                         </div>
                         <div style={{ fontSize: 11, opacity: 0.8 }}>
-                            Cobertura {coverageLabel} ({coveragePercent}%) · {activeBucketsForDisplay}/{bucketsForDisplay} regiões ativas · faixa ≈ {displayBandWidth.toFixed(3)}
+                            Cobertura {coverageLabel} ({coveragePercent}%) · {activeBucketsForDisplay}/{bucketsForDisplay} regiões ativas · faixa ≈ {displayBandWidthLabel}
                         </div>
                         <div style={{ fontSize: 10, opacity: 0.6 }}>
                             Ajuste o controle e pressione Regenerate para recalcular as rachaduras.
@@ -850,11 +855,11 @@ const App: React.FC = () => {
                     <input type="checkbox" checked={Boolean((config as any).render?.debugCrackMask)} onChange={(e) => { (config as any).render = { ...(config as any).render, debugCrackMask: e.target.checked }; setUiTick(t => t + 1); }} /> Show crack mask debug
                 </label>
                 <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={Boolean((config as any).render?.showFbmDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showFbmDelimitations: e.target.checked }; try { localStorage.setItem('showFbmDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show FBM delimitations
+                    <input type="checkbox" checked={Boolean((config as any).render?.showNoiseDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showNoiseDelimitations: e.target.checked }; try { localStorage.setItem('showNoiseDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show noise delimitations
                 </label>
-                {/* Small UI panel showing detected FBM buckets and manual overrides */}
+                {/* Small UI panel showing detected noise buckets and manual overrides */}
                 <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    {/* Legend for FBM bucket states */}
+                    {/* Legend for noise bucket states */}
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '6px 8px', borderRadius: 6 }}>
                         <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
                             <div style={{ fontSize: 11, color: '#EEE', fontWeight: 700 }}>Legenda</div>
@@ -879,13 +884,13 @@ const App: React.FC = () => {
                     </div>
                     {(() => {
                         try {
-                            const detected: Record<number, number> | undefined = (config as any).render?.detectedFbmBuckets;
+                            const detected: Record<number, number> | undefined = (config as any).render?.detectedNoiseBuckets;
                             const forced: number[] | undefined = (config as any).render?.forceActiveBucketIds;
                             if (!detected) return null;
                             const ids = Object.keys(detected).map(k => parseInt(k, 10)).filter(n => !isNaN(n)).sort((a,b)=>a-b);
                             return (
                                 <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', background: 'rgba(0,0,0,0.45)', padding: '6px 8px', borderRadius: 6 }}>
-                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>FBM Buckets</div>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>Noise Buckets</div>
                                     {ids.map(id => {
                                         const count = detected[id] || 0;
                                         const active = Array.isArray(forced) ? forced.indexOf(id) >= 0 : false;
