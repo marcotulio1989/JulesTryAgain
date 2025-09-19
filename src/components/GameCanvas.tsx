@@ -40,10 +40,9 @@ interface GameCanvasPropsInternal extends GameCanvasProps {
     roadLaneTexture?: PIXI.Texture | null;
     roadLaneScale?: number;
     roadLaneAlpha?: number;
-    crashMaskEnabled?: boolean;
 }
 
-const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interiorTextureScale, interiorTextureAlpha, interiorTextureTint, crossfadeEnabled, crossfadeMs, roadCrackTexture, roadCrackScale, roadCrackAlpha, edgeTexture, edgeScale, edgeAlpha, roadLaneTexture, roadLaneScale, roadLaneAlpha, crashMaskEnabled }) => {
+const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interiorTextureScale, interiorTextureAlpha, interiorTextureTint, crossfadeEnabled, crossfadeMs, roadCrackTexture, roadCrackScale, roadCrackAlpha, edgeTexture, edgeScale, edgeAlpha, roadLaneTexture, roadLaneScale, roadLaneAlpha }) => {
     const canvasContainerRef = useRef<HTMLDivElement>(null);
     const pixiRenderer = useRef<PIXI.IRenderer<PIXI.ICanvas> | null>(null);
     const stage = useRef<PIXI.Container | null>(null);
@@ -73,6 +72,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     const roadCrackTextureRef = useRef<PIXI.Texture | null>(roadCrackTexture || null);
     const edgeTextureRef = useRef<PIXI.Texture | null>(edgeTexture || null);
     const proceduralCrackGraphicsRef = useRef<PIXI.Graphics | null>(null);
+    const crackNoiseDebugRef = useRef<PIXI.Graphics | null>(null);
     // Cache para evitar reconstruções pesadas dos marcadores/mascara quando nada mudou
     const laneMarkerCacheRef = useRef<{ key: string; container: PIXI.Container | null } | null>(null);
     const roadLaneScaleRef = useRef<number | undefined>(roadLaneScale);
@@ -92,9 +92,6 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     useEffect(() => {
         try { onMapChange(false); } catch (e) {}
     }, [roadCrackTexture, edgeTexture, roadCrackScale, roadCrackAlpha]);
-    useEffect(() => {
-        try { onMapChange(false); } catch (e) {}
-    }, [crashMaskEnabled]);
     useEffect(() => {
         try { roadLaneScaleRef.current = roadLaneScale; } catch (e) {}
     }, [roadLaneScale]);
@@ -219,19 +216,35 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         let drew = false;
         for (let y = 0; y < maskHeight; y++) {
             let runStart = -1;
+            let runSum = 0;
+            let runCount = 0;
             for (let x = 0; x <= maskWidth; x++) {
-                const val = x < maskWidth ? mask[y * maskWidth + x] : 0;
-                if (val > 0) {
-                    if (runStart === -1) runStart = x;
+                const sample = x < maskWidth ? mask[y * maskWidth + x] : 0;
+                const weight = Math.max(0, Math.min(1, sample / 255));
+                if (weight > 0) {
+                    if (runStart === -1) {
+                        runStart = x;
+                        runSum = weight;
+                        runCount = 1;
+                    } else {
+                        runSum += weight;
+                        runCount++;
+                    }
                 } else if (runStart !== -1) {
                     const runLen = x - runStart;
                     if (runLen > 0) {
-                        g.beginFill(color, finalAlpha);
-                        g.drawRect(runStart * stepX, y * stepY, runLen * stepX, stepY);
-                        g.endFill();
-                        drew = true;
+                        const avgWeight = runSum / (runCount || 1);
+                        const drawAlpha = Math.max(0, Math.min(1, avgWeight * finalAlpha));
+                        if (drawAlpha > 0.01) {
+                            g.beginFill(color, drawAlpha);
+                            g.drawRect(runStart * stepX, y * stepY, runLen * stepX, stepY);
+                            g.endFill();
+                            drew = true;
+                        }
                     }
                     runStart = -1;
+                    runSum = 0;
+                    runCount = 0;
                 }
             }
         }
@@ -240,50 +253,6 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
             return null;
         }
         return g;
-    };
-
-    const buildPolygonMask = (
-        polygons: { x: number; y: number }[][],
-        width: number,
-        height: number,
-        minX: number,
-        minY: number
-    ): Uint8Array | null => {
-        if (!polygons.length || width <= 0 || height <= 0) return null;
-        const mask = new Uint8Array(width * height);
-        const prepared = polygons.map(poly => {
-            let pMinX = Infinity, pMaxX = -Infinity, pMinY = Infinity, pMaxY = -Infinity;
-            for (const v of poly) {
-                if (v.x < pMinX) pMinX = v.x;
-                if (v.x > pMaxX) pMaxX = v.x;
-                if (v.y < pMinY) pMinY = v.y;
-                if (v.y > pMaxY) pMaxY = v.y;
-            }
-            return {
-                bounds: { minX: pMinX, maxX: pMaxX, minY: pMinY, maxY: pMaxY },
-                polygon: { vertices: poly } as blockGeometry.Polygon,
-            };
-        });
-        for (const entry of prepared) {
-            const { minX: polyMinX, maxX: polyMaxX, minY: polyMinY, maxY: polyMaxY } = entry.bounds;
-            const startX = Math.max(0, Math.floor(polyMinX - minX));
-            const endX = Math.min(width - 1, Math.ceil(polyMaxX - minX));
-            const startY = Math.max(0, Math.floor(polyMinY - minY));
-            const endY = Math.min(height - 1, Math.ceil(polyMaxY - minY));
-            if (endX < startX || endY < startY) continue;
-            for (let y = startY; y <= endY; y++) {
-                const sampleY = minY + y + 0.5;
-                if (sampleY < polyMinY - 1e-3 || sampleY > polyMaxY + 1e-3) continue;
-                for (let x = startX; x <= endX; x++) {
-                    const sampleX = minX + x + 0.5;
-                    if (sampleX < polyMinX - 1e-3 || sampleX > polyMaxX + 1e-3) continue;
-                    if (blockGeometry.pointInPolygon({ x: sampleX, y: sampleY }, entry.polygon)) {
-                        mask[y * width + x] = 255;
-                    }
-                }
-            }
-        }
-        return mask;
     };
 
     // Stable node key generator: snap coordinates to a small grid before stringifying.
@@ -2077,6 +2046,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 try { proceduralCrackGraphicsRef.current.destroy(true); } catch (e) {}
                 proceduralCrackGraphicsRef.current = null;
             }
+            if (crackNoiseDebugRef.current) {
+                try { crackNoiseDebugRef.current.destroy(true); } catch (e) {}
+                crackNoiseDebugRef.current = null;
+            }
             roadCrackDisplayRef.current = null;
             const renderCfg = (config as any).render || {};
             const useProceduralCracks = !!renderCfg.crackUseProcedural;
@@ -2146,18 +2119,8 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const spriteW = Math.max(4, Math.ceil(maxX - minX));
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
                     let cracksDisplay: PIXI.DisplayObject | null = null;
-                    let crashMaskDebugGraphics: PIXI.Graphics | null = null;
-                    const crashMaskActive = !!(renderCfg.crashMaskEnabled);
-                    const wantCrashMaskDebug = !!(renderCfg.debugCrackMask);
-                    const shouldBuildCrashMask = (crashMaskActive || wantCrashMaskDebug) && polys.length > 0;
-                    let polygonMask: Uint8Array | null = null;
-                    if (shouldBuildCrashMask) {
-                        try {
-                            polygonMask = buildPolygonMask(polys, spriteW, spriteH, minX, minY);
-                        } catch (e) {
-                            polygonMask = null;
-                        }
-                    }
+                    let noiseDebugGraphics: PIXI.Graphics | null = null;
+                    let noiseMaskGraphics: PIXI.Graphics | null = null;
 
                     if (useProceduralCracks) {
                         const raster = generateCrackRaster({
@@ -2167,26 +2130,71 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             minY,
                             renderConfig: renderCfg,
                             isoToWorld,
-                            debugMask: polygonMask ? { data: polygonMask, width: spriteW, height: spriteH } : undefined,
-                            captureCrashMask: crashMaskActive || wantCrashMaskDebug,
                         });
                         if (raster) {
+                        let hasActiveHighlight = false;
+                        if (renderCfg.showNoiseDelimitations && raster.debugRegion) {
+                            try {
+                                const region = raster.debugRegion;
+                                const highlight = new Set<number>();
+                                if (Array.isArray(region.activeBucketIds)) {
+                                    for (const v of region.activeBucketIds) {
+                                        const n = Number(v);
+                                        if (Number.isFinite(n)) highlight.add(Math.floor(n));
+                                    }
+                                }
+                                const hasHighlight = highlight.size > 0;
+                                hasActiveHighlight = hasHighlight;
+                                const safeCellW = Math.max(0.0001, Number.isFinite(region.cellW) ? region.cellW : 0);
+                                const safeCellH = Math.max(0.0001, Number.isFinite(region.cellH) ? region.cellH : 0);
+                                const strokeWidth = Math.max(
+                                    0.35,
+                                    Math.min(2.25, Math.min(safeCellW, safeCellH) * 0.08),
+                                );
+                                const activeColor = 0x38bdf8;
+                                const inactiveBorderAlpha = hasHighlight ? 0.18 : 0.14;
+                                const activeBorderAlpha = hasHighlight ? 0.7 : 0.4;
+                                const activeFillAlpha = hasHighlight ? 0.38 : 0.28;
+                                const g = new PIXI.Graphics();
+                                for (let ry = 0; ry < region.h; ry++) {
+                                    for (let rx = 0; rx < region.w; rx++) {
+                                        const idx = ry * region.w + rx;
+                                        const bucket = region.map[idx] ?? 0;
+                                        const isActive = !hasHighlight || highlight.has(bucket);
+                                        const strokeAlpha = isActive ? activeBorderAlpha : inactiveBorderAlpha;
+                                        const fillAlpha = isActive ? activeFillAlpha : 0;
+                                        g.lineStyle(strokeWidth, activeColor, strokeAlpha);
+                                        g.beginFill(activeColor, fillAlpha);
+                                        g.drawRect(rx * safeCellW, ry * safeCellH, safeCellW, safeCellH);
+                                        g.endFill();
+                                    }
+                                }
+                                noiseDebugGraphics = g;
+                            } catch (err) {
+                                try { console.warn('[GameCanvas] Failed to build noise delimitations overlay', err); } catch (e) {}
+                            }
+                        }
+                        if (renderCfg.showNoiseDelimitations && raster.noiseMask) {
+                            try {
+                                const overlayAlpha = hasActiveHighlight ? 0.34 : 0.28;
+                                noiseMaskGraphics = maskToGraphics(
+                                    raster.noiseMask.data,
+                                    raster.noiseMask.width,
+                                    raster.noiseMask.height,
+                                    spriteW,
+                                    spriteH,
+                                    0x38bdf8,
+                                    overlayAlpha,
+                                );
+                            } catch (err) {
+                                try { console.warn('[GameCanvas] Failed to build noise mask overlay', err); } catch (e) {}
+                            }
+                        }
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
                             const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
                                 cracksDisplay = graphics;
                                 proceduralCrackGraphicsRef.current = graphics;
-                                if (wantCrashMaskDebug && raster.crashMask) {
-                                    crashMaskDebugGraphics = maskToGraphics(
-                                        raster.crashMask.data,
-                                        raster.crashMask.width,
-                                        raster.crashMask.height,
-                                        spriteW,
-                                        spriteH,
-                                        0x00FFFF,
-                                        0.25
-                                    );
-                                }
                             }
                         }
                     }
@@ -2237,15 +2245,25 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         cracksDisplay = sprite;
                     }
 
-                    if (cracksDisplay) {
+                    if (cracksDisplay || noiseDebugGraphics || noiseMaskGraphics) {
                         const container = new PIXI.Container();
                         container.x = minX;
                         container.y = minY;
-                        cracksDisplay.x = 0;
-                        cracksDisplay.y = 0;
-                        container.addChild(cracksDisplay);
-                        if (crashMaskDebugGraphics) {
-                            container.addChild(crashMaskDebugGraphics);
+                        if (noiseMaskGraphics) {
+                            noiseMaskGraphics.x = 0;
+                            noiseMaskGraphics.y = 0;
+                            container.addChild(noiseMaskGraphics);
+                        }
+                        if (noiseDebugGraphics) {
+                            noiseDebugGraphics.x = 0;
+                            noiseDebugGraphics.y = 0;
+                            container.addChild(noiseDebugGraphics);
+                            crackNoiseDebugRef.current = noiseDebugGraphics;
+                        }
+                        if (cracksDisplay) {
+                            cracksDisplay.x = 0;
+                            cracksDisplay.y = 0;
+                            container.addChild(cracksDisplay);
                         }
                         container.addChild(maskG);
                         container.mask = maskG;
@@ -2256,26 +2274,6 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         } else {
                             roadCrackDisplayRef.current = null;
                         }
-
-                        try {
-                            if (renderCfg.debugCrackMask) {
-                                const debugG = new PIXI.Graphics();
-                                debugG.lineStyle(2, 0x0000FF, 0.8);
-                                debugG.drawRect(minX, minY, maxX - minX, maxY - minY);
-                                debugG.lineStyle(1, 0xFF0000, 0.9);
-                                for (const poly of polys) {
-                                    debugG.moveTo(poly[0].x, poly[0].y);
-                                    for (let i = 1; i < poly.length; i++) debugG.lineTo(poly[i].x, poly[i].y);
-                                    debugG.closePath();
-                                }
-                                if (padding > 4) {
-                                    debugG.beginFill(0x00FF00, 0.9);
-                                    debugG.drawCircle(minX + 6, minY + 6, 4);
-                                    debugG.endFill();
-                                }
-                                roadCrackOverlay.current?.addChild(debugG);
-                            }
-                        } catch (e) {}
 
                         try { console.debug('[GameCanvas] roadCrackOverlay added container, childrenNow=', roadCrackOverlay.current?.children.length); } catch (e) {}
                     }
