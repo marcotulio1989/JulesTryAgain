@@ -219,19 +219,35 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         let drew = false;
         for (let y = 0; y < maskHeight; y++) {
             let runStart = -1;
+            let runSum = 0;
+            let runCount = 0;
             for (let x = 0; x <= maskWidth; x++) {
-                const val = x < maskWidth ? mask[y * maskWidth + x] : 0;
-                if (val > 0) {
-                    if (runStart === -1) runStart = x;
+                const sample = x < maskWidth ? mask[y * maskWidth + x] : 0;
+                const weight = Math.max(0, Math.min(1, sample / 255));
+                if (weight > 0) {
+                    if (runStart === -1) {
+                        runStart = x;
+                        runSum = weight;
+                        runCount = 1;
+                    } else {
+                        runSum += weight;
+                        runCount++;
+                    }
                 } else if (runStart !== -1) {
                     const runLen = x - runStart;
                     if (runLen > 0) {
-                        g.beginFill(color, finalAlpha);
-                        g.drawRect(runStart * stepX, y * stepY, runLen * stepX, stepY);
-                        g.endFill();
-                        drew = true;
+                        const avgWeight = runSum / (runCount || 1);
+                        const drawAlpha = Math.max(0, Math.min(1, avgWeight * finalAlpha));
+                        if (drawAlpha > 0.01) {
+                            g.beginFill(color, drawAlpha);
+                            g.drawRect(runStart * stepX, y * stepY, runLen * stepX, stepY);
+                            g.endFill();
+                            drew = true;
+                        }
                     }
                     runStart = -1;
+                    runSum = 0;
+                    runCount = 0;
                 }
             }
         }
@@ -2147,6 +2163,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
                     let cracksDisplay: PIXI.DisplayObject | null = null;
                     let crashMaskDebugGraphics: PIXI.Graphics | null = null;
+                    let noiseMaskGraphics: PIXI.Graphics | null = null;
                     const crashMaskActive = !!(renderCfg.crashMaskEnabled);
                     const wantCrashMaskDebug = !!(renderCfg.debugCrackMask);
                     const shouldBuildCrashMask = (crashMaskActive || wantCrashMaskDebug) && polys.length > 0;
@@ -2171,6 +2188,22 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             captureCrashMask: crashMaskActive || wantCrashMaskDebug,
                         });
                         if (raster) {
+                        if (renderCfg.showNoiseDelimitations && raster.noiseMask) {
+                            try {
+                                const overlayAlpha = renderCfg.debugCrackMask ? 0.35 : 0.28;
+                                noiseMaskGraphics = maskToGraphics(
+                                    raster.noiseMask.data,
+                                    raster.noiseMask.width,
+                                    raster.noiseMask.height,
+                                    spriteW,
+                                    spriteH,
+                                    0x38bdf8,
+                                    overlayAlpha,
+                                );
+                            } catch (err) {
+                                try { console.warn('[GameCanvas] Failed to build noise mask overlay', err); } catch (e) {}
+                            }
+                        }
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
                             const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
@@ -2237,13 +2270,20 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         cracksDisplay = sprite;
                     }
 
-                    if (cracksDisplay) {
+                    if (cracksDisplay || noiseMaskGraphics) {
                         const container = new PIXI.Container();
                         container.x = minX;
                         container.y = minY;
-                        cracksDisplay.x = 0;
-                        cracksDisplay.y = 0;
-                        container.addChild(cracksDisplay);
+                        if (noiseMaskGraphics) {
+                            noiseMaskGraphics.x = 0;
+                            noiseMaskGraphics.y = 0;
+                            container.addChild(noiseMaskGraphics);
+                        }
+                        if (cracksDisplay) {
+                            cracksDisplay.x = 0;
+                            cracksDisplay.y = 0;
+                            container.addChild(cracksDisplay);
+                        }
                         if (crashMaskDebugGraphics) {
                             container.addChild(crashMaskDebugGraphics);
                         }

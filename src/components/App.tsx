@@ -7,7 +7,6 @@ import TextureLoader from './TextureLoader';
 import TextureGallery from './TextureGallery';
 import ToggleButton from './ToggleButton';
 import MapStore from '../stores/MapStore';
-import { CracksPreview } from './CracksPreview';
 // Controles avançados removidos: sem overlay/zonas aleatórias aqui
 
 const App: React.FC = () => {
@@ -163,7 +162,6 @@ const App: React.FC = () => {
 
     const [interiorTexture, setInteriorTexture] = useState<PIXI.Texture | null>(null);
     const [controlsCollapsed, setControlsCollapsed] = useState<boolean>(false);
-    const [showCracksPreview, setShowCracksPreview] = useState<boolean>(false);
     const [roadCrackTexture, setRoadCrackTexture] = useState<PIXI.Texture | null>(null);
     const [edgeTexture, setEdgeTexture] = useState<PIXI.Texture | null>(null);
     const [gallery, setGallery] = useState<Array<{ id:number; name:string; url:string; texture:PIXI.Texture }>>([]);
@@ -189,60 +187,53 @@ const App: React.FC = () => {
         try { const v = localStorage.getItem('crashMaskEnabled'); if (v !== null) return v === 'true'; } catch (e) {}
         return !!(config as any).render.crashMaskEnabled;
     });
-    if (!(config as any).render.crackNoiseParams) {
-        (config as any).render.crackNoiseParams = {
-            baseScale: 1 / 480,
-            octaves: 4,
-            lacunarity: 2.0,
-            gain: 0.5,
-            buckets: 3,
-            crackBandWidth: 0.008,
-            maxActiveBuckets: 2,
-            activeBucketStrategy: 'smallest'
-        };
-    }
     const ensureNoiseDefaults = () => {
         const params = (config as any).render.crackNoiseParams || {};
-        const buckets = Math.max(1, Math.round(params.buckets ?? 3));
-        const maxActive = Math.max(1, Math.min(buckets, params.maxActiveBuckets ?? Math.max(1, Math.round(buckets / 2))));
+        const baseScaleRaw = Number(params.baseScale);
+        const octavesRaw = Number(params.octaves);
+        const lacunarityRaw = Number(params.lacunarity);
+        const gainRaw = Number(params.gain);
+        const thresholdRaw = Number(params.threshold);
+        const featherRaw = Number(params.feather);
+        const baseScale = Number.isFinite(baseScaleRaw) ? baseScaleRaw : 1 / 420;
+        const octaves = Number.isFinite(octavesRaw) ? Math.max(1, Math.round(octavesRaw)) : 3;
+        const lacunarity = Number.isFinite(lacunarityRaw) ? Math.max(0.1, lacunarityRaw) : 2.15;
+        const gain = Number.isFinite(gainRaw) ? Math.max(0.05, Math.min(1.5, gainRaw)) : 0.55;
+        const threshold = Math.max(0.12, Math.min(0.9, Number.isFinite(thresholdRaw) ? thresholdRaw : 0.6));
+        const feather = Math.max(0.04, Math.min(0.25, Number.isFinite(featherRaw) ? featherRaw : 0.14));
         return {
-            baseScale: params.baseScale ?? 1 / 480,
-            octaves: params.octaves ?? 4,
-            lacunarity: params.lacunarity ?? 2.0,
-            gain: params.gain ?? 0.5,
-            buckets,
-            crackBandWidth: params.crackBandWidth ?? 0.008,
-            maxActiveBuckets: maxActive,
-            activeBucketStrategy: params.activeBucketStrategy ?? 'smallest'
+            baseScale,
+            octaves,
+            lacunarity,
+            gain,
+            threshold,
+            feather,
+            minThreshold: 0.12,
+            maxThreshold: 0.9,
+            minFeather: 0.04,
+            maxFeather: 0.25,
         };
     };
-    const noiseDefaultsRef = React.useRef<{
-        baseScale: number;
-        octaves: number;
-        lacunarity: number;
-        gain: number;
-        buckets: number;
-        crackBandWidth: number;
-        maxActiveBuckets: number;
-        activeBucketStrategy: string;
-    } | null>(null);
+    const noiseDefaultsRef = React.useRef<ReturnType<typeof ensureNoiseDefaults> | null>(null);
     if (!noiseDefaultsRef.current) {
         noiseDefaultsRef.current = ensureNoiseDefaults();
     }
     const noiseDefaults = noiseDefaultsRef.current!;
-    const [crackAreaCoverage, setCrackAreaCoverage] = useState<number>(() => {
-        const stored = safeLoadNumber('crack.areaCoverage', -1);
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+    const [crackNoiseCoverage, setCrackNoiseCoverage] = useState<number>(() => {
+        const stored = safeLoadNumber('crack.noiseCoverage', -1);
         if (isFinite(stored) && stored >= 0 && stored <= 1) return stored;
-        return Math.min(1, Math.max(0, (noiseDefaults.maxActiveBuckets || 1) / Math.max(1, noiseDefaults.buckets || 1)));
+        const span = Math.max(0.001, noiseDefaults.maxThreshold - noiseDefaults.minThreshold);
+        const normalized = 1 - ((noiseDefaults.threshold - noiseDefaults.minThreshold) / span);
+        return clamp01(normalized);
     });
-    const bucketsForDisplay = Math.max(1, noiseDefaults.buckets || 3);
-    const activeBucketsForDisplay = Math.max(1, Math.min(bucketsForDisplay, Math.round(1 + crackAreaCoverage * (bucketsForDisplay - 1))));
-    const coveragePercent = Math.round((activeBucketsForDisplay / bucketsForDisplay) * 100);
+    const coverageNormalized = clamp01(crackNoiseCoverage);
+    const thresholdRange = noiseDefaults.maxThreshold - noiseDefaults.minThreshold;
+    const thresholdValue = noiseDefaults.minThreshold + (1 - coverageNormalized) * thresholdRange;
+    const featherRange = noiseDefaults.maxFeather - noiseDefaults.minFeather;
+    const featherValue = noiseDefaults.minFeather + coverageNormalized * featherRange;
+    const coveragePercent = Math.round(coverageNormalized * 100);
     const coverageLabel = coveragePercent <= 33 ? 'Baixa' : (coveragePercent >= 67 ? 'Alta' : 'Média');
-    const baseBandDisplay = noiseDefaults.crackBandWidth || 0.008;
-    const minBandDisplay = Math.max(0.001, baseBandDisplay * 0.5);
-    const maxBandDisplay = Math.min(0.05, baseBandDisplay * 2.5);
-    const displayBandWidth = minBandDisplay + (maxBandDisplay - minBandDisplay) * crackAreaCoverage;
     const [edgeScale, setEdgeScale] = useState<number>(() => safeLoadNumber('edgeScale', (config as any).render.edgeTextureScale || 1.0));
     const [edgeAlpha, setEdgeAlpha] = useState<number>(() => safeLoadNumber('edgeAlpha', (config as any).render.edgeTextureAlpha ?? 1.0));
     // controls for road lane overlay
@@ -281,18 +272,6 @@ const App: React.FC = () => {
         } catch (e) {}
         try { (config as any).render.roadCrackUseTexture = true; } catch (e) {}
         setUiTick(t => t + 1);
-    };
-
-    // Apply a canvas directly as the road crack texture
-    const applyCanvasAsRoadCrack = (canvas: HTMLCanvasElement, target: 'road' | 'edge' | 'both') => {
-        try {
-            const base = new PIXI.BaseTexture(canvas as any);
-            try { base.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch(e) {}
-            const tex = new PIXI.Texture(base);
-            handleRoadCrackLoad(tex, 'preview-canvas');
-        } catch (e) {
-            console.warn('[App] applyCanvasAsRoadCrack failed', e);
-        }
     };
 
     const handleEdgeLoad = (tex: PIXI.Texture, url: string) => {
@@ -355,29 +334,24 @@ const App: React.FC = () => {
     React.useEffect(() => {
         const defaults = noiseDefaultsRef.current;
         if (!defaults) return;
-        const params = (config as any).render.crackNoiseParams || {};
-        const buckets = Math.max(1, defaults.buckets || params.buckets || 3);
-        const coverage = Math.min(1, Math.max(0, crackAreaCoverage));
-        const activeCount = Math.max(1, Math.min(buckets, Math.round(1 + coverage * (buckets - 1))));
-        const baseBand = defaults.crackBandWidth || 0.008;
-        const minBand = Math.max(0.001, baseBand * 0.5);
-        const maxBand = Math.min(0.05, baseBand * 2.5);
-        const computedBand = minBand + (maxBand - minBand) * coverage;
+        const coverage = clamp01(crackNoiseCoverage);
+        const thresholdRangeEff = Math.max(0.0001, defaults.maxThreshold - defaults.minThreshold);
+        const featherRangeEff = Math.max(0.0001, defaults.maxFeather - defaults.minFeather);
+        const threshold = defaults.minThreshold + (1 - coverage) * thresholdRangeEff;
+        const feather = defaults.minFeather + coverage * featherRangeEff;
+        noiseDefaultsRef.current = { ...defaults, threshold, feather };
         const nextParams = {
-            ...params,
             baseScale: defaults.baseScale,
             octaves: defaults.octaves,
             lacunarity: defaults.lacunarity,
             gain: defaults.gain,
-            buckets,
-            crackBandWidth: computedBand,
-            maxActiveBuckets: activeCount,
-            activeBucketStrategy: params.activeBucketStrategy || defaults.activeBucketStrategy || 'smallest'
+            threshold,
+            feather,
         };
         (config as any).render.crackNoiseParams = nextParams;
-        try { localStorage.setItem('crack.areaCoverage', String(coverage)); } catch (e) {}
+        try { localStorage.setItem('crack.noiseCoverage', String(coverage)); } catch (e) {}
         setUiTick(t => t + 1);
-    }, [crackAreaCoverage]);
+    }, [crackNoiseCoverage]);
     // persist crashMaskEnabled
     React.useEffect(() => {
         try { (config as any).render.crashMaskEnabled = crashMaskEnabled; } catch (e) {}
@@ -388,16 +362,6 @@ const App: React.FC = () => {
         try { (config as any).render.roadCrackTextureAlpha = crackAlpha; } catch (e) {}
         try { localStorage.setItem('roadCrackAlpha', String(crackAlpha)); } catch (e) {}
     }, [crackAlpha]);
-
-    // Persist crack mask padding and touch epsilon to config and localStorage
-    React.useEffect(() => {
-        try { (config as any).render.crackMaskPaddingDefault = crackMaskPadding; } catch (e) {}
-        try { localStorage.setItem('crackMaskPadding', String(crackMaskPadding)); } catch (e) {}
-    }, [crackMaskPadding]);
-    React.useEffect(() => {
-        try { (config as any).render.crackMaskTouchEps = crackMaskTouchEps; } catch (e) {}
-        try { localStorage.setItem('crackMaskTouchEps', String(crackMaskTouchEps)); } catch (e) {}
-    }, [crackMaskTouchEps]);
     React.useEffect(() => {
         try { (config as any).render.edgeTextureScale = edgeScale; } catch (e) {}
         try { localStorage.setItem('edgeScale', String(edgeScale)); } catch (e) {}
@@ -787,13 +751,13 @@ const App: React.FC = () => {
                 <div style={{ display: 'inline-block', marginLeft: 12, padding: '6px', border: '1px solid #444', borderRadius: 6 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Crack Noise</div>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar fBm para delimitar
+                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar ruído distorcido para delimitar
                     </label>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                         <input type="checkbox" checked={crashMaskEnabled} onChange={(e) => setCrashMaskEnabled(e.target.checked)} /> Aplicar Crash Mask (apenas nas vias)
                     </label>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
-                        <label style={{ fontSize: 12, fontWeight: 600 }}>Quantidade de áreas com rachadura</label>
+                        <label style={{ fontSize: 12, fontWeight: 600 }}>Cobertura de rachaduras</label>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                             <span style={{ fontSize: 11, opacity: 0.7 }}>Menos</span>
                             <input
@@ -801,18 +765,18 @@ const App: React.FC = () => {
                                 min={0}
                                 max={100}
                                 step={1}
-                                value={Math.round(crackAreaCoverage * 100)}
+                                value={Math.round(coverageNormalized * 100)}
                                 onChange={(e) => {
                                     const raw = parseInt(e.target.value, 10);
                                     const normalized = isFinite(raw) ? Math.min(1, Math.max(0, raw / 100)) : 0;
-                                    setCrackAreaCoverage(normalized);
+                                    setCrackNoiseCoverage(normalized);
                                 }}
                                 style={{ flex: 1 }}
                             />
                             <span style={{ fontSize: 11, opacity: 0.7 }}>Mais</span>
                         </div>
                         <div style={{ fontSize: 11, opacity: 0.8 }}>
-                            Cobertura {coverageLabel} ({coveragePercent}%) · {activeBucketsForDisplay}/{bucketsForDisplay} regiões ativas · faixa ≈ {displayBandWidth.toFixed(3)}
+                            Cobertura {coverageLabel} ({coveragePercent}%) · threshold ≈ {thresholdValue.toFixed(2)} · suavização ≈ {(featherValue * 100).toFixed(0)}%
                         </div>
                         <div style={{ fontSize: 10, opacity: 0.6 }}>
                             Ajuste o controle e pressione Regenerate para recalcular as rachaduras.
@@ -844,125 +808,13 @@ const App: React.FC = () => {
                 
                 <button onClick={regenerateMap} style={{ marginLeft: 8 }}>Regenerate</button>
                 <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={showCracksPreview} onChange={(e) => setShowCracksPreview(e.target.checked)} /> Preview Rachaduras
-                </label>
-                <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                     <input type="checkbox" checked={Boolean((config as any).render?.debugCrackMask)} onChange={(e) => { (config as any).render = { ...(config as any).render, debugCrackMask: e.target.checked }; setUiTick(t => t + 1); }} /> Show crack mask debug
                 </label>
                 <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={Boolean((config as any).render?.showFbmDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showFbmDelimitations: e.target.checked }; try { localStorage.setItem('showFbmDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show FBM delimitations
+                    <input type="checkbox" checked={Boolean((config as any).render?.showNoiseDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showNoiseDelimitations: e.target.checked }; try { localStorage.setItem('showNoiseDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show noise delimitations
                 </label>
-                {/* Small UI panel showing detected FBM buckets and manual overrides */}
-                <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    {/* Legend for FBM bucket states */}
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '6px 8px', borderRadius: 6 }}>
-                        <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-                            <div style={{ fontSize: 11, color: '#EEE', fontWeight: 700 }}>Legenda</div>
-                            <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                                <div style={{ width: 14, height: 14, background: '#2E7D32', borderRadius: 3, border: '1px solid rgba(0,0,0,0.5)' }} />
-                                <div style={{ fontSize: 12, color: '#EEE' }}>Ativo</div>
-                            </div>
-                            <div style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
-                                <div style={{ width: 14, height: 14, background: 'transparent', borderRadius: 3, border: '1px solid rgba(200,200,200,0.5)' }} />
-                                <div style={{ fontSize: 12, color: '#EEE' }}>Inativo</div>
-                            </div>
-                        </div>
-                        {/* sample palette swatches */}
-                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                            {/* palette used by HUD / generator - small swatches */}
-                            <div style={{ width: 16, height: 16, background: '#FF00FF', borderRadius: 3, border: '1px solid rgba(0,0,0,0.4)' }} />
-                            <div style={{ width: 16, height: 16, background: '#00FFFF', borderRadius: 3, border: '1px solid rgba(0,0,0,0.4)' }} />
-                            <div style={{ width: 16, height: 16, background: '#FFFF00', borderRadius: 3, border: '1px solid rgba(0,0,0,0.4)' }} />
-                            <div style={{ width: 16, height: 16, background: '#FF8000', borderRadius: 3, border: '1px solid rgba(0,0,0,0.4)' }} />
-                            <div style={{ width: 16, height: 16, background: '#00FF00', borderRadius: 3, border: '1px solid rgba(0,0,0,0.4)' }} />
-                        </div>
-                    </div>
-                    {(() => {
-                        try {
-                            const detected: Record<number, number> | undefined = (config as any).render?.detectedFbmBuckets;
-                            const forced: number[] | undefined = (config as any).render?.forceActiveBucketIds;
-                            if (!detected) return null;
-                            const ids = Object.keys(detected).map(k => parseInt(k, 10)).filter(n => !isNaN(n)).sort((a,b)=>a-b);
-                            return (
-                                <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', background: 'rgba(0,0,0,0.45)', padding: '6px 8px', borderRadius: 6 }}>
-                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>FBM Buckets</div>
-                                    {ids.map(id => {
-                                        const count = detected[id] || 0;
-                                        const active = Array.isArray(forced) ? forced.indexOf(id) >= 0 : false;
-                                        return (
-                                            <label key={id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: active ? '#2E7D32' : 'transparent', padding: '2px 6px', borderRadius: 4 }}>
-                                                <input type="checkbox" checked={active} onChange={(e) => {
-                                                    try {
-                                                        const cur = Array.isArray((config as any).render?.forceActiveBucketIds) ? (config as any).render.forceActiveBucketIds.slice() : [];
-                                                        if (e.target.checked) {
-                                                            if (cur.indexOf(id) < 0) cur.push(id);
-                                                        } else {
-                                                            const idx = cur.indexOf(id);
-                                                            if (idx >= 0) cur.splice(idx, 1);
-                                                        }
-                                                        (config as any).render = { ...(config as any).render, forceActiveBucketIds: cur };
-                                                        // trigger a regenerate so the new forced buckets are applied
-                                                        try { MapActions.generate((config as any).render?.crackSeed || Date.now()); } catch (e) {}
-                                                        setUiTick(t => t + 1);
-                                                    } catch (e) {}
-                                                }} />
-                                                <span style={{ color: '#EEE', fontSize: 12 }}>#{id} ({count})</span>
-                                            </label>
-                                        );
-                                    })}
-                                    <button style={{ marginLeft: 8 }} onClick={() => {
-                                        try {
-                                            // clear overrides
-                                            (config as any).render = { ...(config as any).render, forceActiveBucketIds: [] };
-                                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                                            setUiTick(t => t + 1);
-                                        } catch (e) {}
-                                    }}>Clear</button>
-                                </div>
-                            );
-                        } catch (e) { return null; }
-                    })()}
-                </div>
-                {/* Quality presets for procedural cracks */}
-                <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>Quality</div>
-                    <button onClick={() => {
-                        try {
-                            // Low quality: faster, coarser noise
-                            (config as any).render = {
-                                ...(config as any).render,
-                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 0.5 },
-                                crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 2, octaves: 3, crackBandWidth: 0.02, maxActiveBuckets: 1 }
-                            };
-                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                            setUiTick(t => t + 1);
-                        } catch (e) {}
-                    }}>Low</button>
-                    <button onClick={() => {
-                        try {
-                            // Medium quality: balanced
-                            (config as any).render = {
-                                ...(config as any).render,
-                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 1 },
-                                crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 3, octaves: 4, crackBandWidth: 0.012, maxActiveBuckets: 2 }
-                            };
-                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                            setUiTick(t => t + 1);
-                        } catch (e) {}
-                    }}>Medium</button>
-                    <button onClick={() => {
-                        try {
-                            // High quality: finer noise and more buckets (may be slower / larger raster)
-                            (config as any).render = {
-                                ...(config as any).render,
-                                crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 2 },
-                                crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 5, octaves: 5, crackBandWidth: 0.006, maxActiveBuckets: 3 }
-                            };
-                            MapActions.generate((config as any).render?.crackSeed || Date.now());
-                            setUiTick(t => t + 1);
-                        } catch (e) {}
-                    }}>High</button>
-                    <span style={{ fontSize: 11, opacity: 0.85, marginLeft: 8 }}>Presets adjust `quality` and noise params; High may be slower or hit canvas clamps.</span>
+                <div style={{ marginLeft: 8, fontSize: 11, opacity: 0.75 }}>
+                    Ruído limiarizado com domínio distorcido · baseScale {(noiseDefaults.baseScale).toFixed(4)} · octaves {noiseDefaults.octaves} · lacunarity {noiseDefaults.lacunarity.toFixed(2)} · gain {noiseDefaults.gain.toFixed(2)}
                 </div>
                 <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                     <label style={{ fontSize: 12 }}>Mask Pad</label>
@@ -1022,37 +874,6 @@ const App: React.FC = () => {
                     <div>t2: {(config as any).zoningModel.heatmapThresholds.t2.toFixed(2)}</div>
                     <div>t3: {(config as any).zoningModel.heatmapThresholds.t3.toFixed(2)}</div>
                     <div>t4: {(config as any).zoningModel.heatmapThresholds.t4.toFixed(2)}</div>
-                </div>
-            )}
-            {showCracksPreview && (
-                <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
-                    <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)' }} onClick={() => setShowCracksPreview(false)} />
-                    <div style={{ position: 'relative', background: '#222', padding: 16, borderRadius: 8, boxShadow: '0 10px 30px rgba(0,0,0,0.6)', maxWidth: '90%', maxHeight: '90%', overflow: 'auto' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                            <div style={{ color: '#eee', fontWeight: 700 }}>Preview: Rachaduras → Ruas</div>
-                            <button onClick={() => setShowCracksPreview(false)} style={{ marginLeft: 12 }}>Fechar</button>
-                        </div>
-                        <CracksPreview width={640} height={640} onApplyCanvas={(canvas: HTMLCanvasElement, target: 'road'|'edge'|'both') => {
-                            try {
-                                // destroy previous textures appropriately before creating new ones
-                                if (target === 'road' || target === 'both') {
-                                    // create base texture
-                                    const base = new PIXI.BaseTexture(canvas as any);
-                                    try { base.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch (e) {}
-                                    const tex = new PIXI.Texture(base);
-                                    handleRoadCrackLoad(tex, 'preview-canvas');
-                                }
-                                if (target === 'edge' || target === 'both') {
-                                    const base2 = new PIXI.BaseTexture(canvas as any);
-                                    try { base2.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch (e) {}
-                                    const tex2 = new PIXI.Texture(base2);
-                                    handleEdgeLoad(tex2, 'preview-canvas');
-                                }
-                            } catch (e) {
-                                console.warn('[App] apply preview failed', e);
-                            }
-                        }} />
-                    </div>
                 </div>
             )}
         </div>
