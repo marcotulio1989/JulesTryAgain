@@ -1,4 +1,5 @@
 import { Noise } from 'noisejs';
+import { sampleWarpedNoise } from '../lib/noiseField';
 
 export interface CrackGeneratorOptions {
     divisions: number;
@@ -16,18 +17,6 @@ function makeRng(seed: number) {
         return state / 0x100000000;
     };
 }
-
-export const fbmNoise = (
-    noise: Noise,
-    x: number,
-    y: number,
-    _octaves = 1,
-    _lacunarity = 2,
-    _gain = 0.5,
-) => {
-    const value = noise.perlin2(x, y);
-    return value * 0.5 + 0.5;
-};
 
 export function generateVoronoiCrackImage(width: number, height: number, options: CrackGeneratorOptions): Uint8ClampedArray {
     const sw = Math.max(1, Math.round(width));
@@ -160,7 +149,7 @@ export interface CrackRaster {
     height: number;
     quality: number;
     color: [number, number, number];
-    // Optional debug info for noise bucket region visualization (legacy FBM naming)
+    // Optional debug info for noise bucket region visualization (legacy naming kept for backwards compatibility)
     debugRegion?: {
         map: Uint8Array;
         w: number;
@@ -171,6 +160,7 @@ export interface CrackRaster {
         minX: number;
         minY: number;
         quality: number;
+        activeBuckets?: number[];
     };
     crashMask?: {
         data: Uint8Array;
@@ -240,11 +230,11 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         if (typeof console !== 'undefined' && console.warn) {
             console.warn('[crackGenerator] Procedural crack raster skipped – area too large after clamping', { canvasW, canvasH, quality });
         }
-        // If the caller explicitly requested legacy FBM debug delimitations, return a
+        // If the caller explicitly requested legacy noise debug delimitations, return a
         // tiny placeholder raster that includes a coarse `debugRegion` so the
         // UI can still visualize noise buckets even when the full raster is
         // skipped due to clamping limits.
-    if (renderConfig?.showFbmDelimitations && renderConfig?.crackUseNoise) {
+    if (renderConfig?.showNoiseDelimitations && renderConfig?.crackUseNoise) {
             try {
                 const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
                 const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3 };
@@ -265,7 +255,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                         const worldPt = (renderConfig && renderConfig.mode === 'isometric')
                             ? { x: screenPt.x, y: screenPt.y }
                             : isoToWorld(screenPt);
-                        const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                        const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
                         let id = Math.floor(v * buckets);
                         if (id < 0) id = 0;
                         if (id >= buckets) id = buckets - 1;
@@ -285,6 +275,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     minX,
                     minY,
                     quality,
+                    activeBuckets: Array.from({ length: buckets }, (_, i) => i),
                 };
                 return out;
             } catch (e) {
@@ -321,7 +312,8 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_regionCellW = 0;
     let debug_regionCellH = 0;
     let debug_buckets = 0;
-    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
+    let debug_activeBuckets: number[] | null = null;
+    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showNoiseDelimitations);
     let debugMaskData: Uint8Array | null = null;
     if (debugMask && debugMask.data) {
         if (debugMask.width === width && debugMask.height === height) {
@@ -365,7 +357,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 const worldPt = (renderConfig && renderConfig.mode === 'isometric')
                     ? { x: screenPt.x, y: screenPt.y }
                     : isoToWorld(screenPt);
-                const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale);
+                const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale);
                 let id = Math.floor(v * buckets);
                 if (id < 0) id = 0;
                 if (id >= buckets) id = buckets - 1;
@@ -448,6 +440,8 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 // ignore malformed input
             }
         }
+
+        debug_activeBuckets = Array.from(activeBuckets).sort((a, b) => a - b);
 
         debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
         debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
@@ -597,6 +591,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             minX,
             minY,
             quality,
+            activeBuckets: debug_activeBuckets || undefined,
         };
     }
     if (crashMaskData) {
