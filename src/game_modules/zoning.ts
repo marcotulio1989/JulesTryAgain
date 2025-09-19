@@ -3,6 +3,7 @@ import type { Point } from '../generic_modules/math';
 import type { ZoneName } from './mapgen';
 import { heatmap } from './mapgen';
 import { config } from './config';
+import { sampleWarpedNoise } from '../lib/noiseField';
 
 export type ZoningParams = {
   baseScale: number;
@@ -11,17 +12,6 @@ export type ZoningParams = {
   gain: number;
   thresholds: { r1: number; r2: number; r3: number; r4: number };
 };
-
-function fbm(noise: Noise, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5): number {
-  let freq = 1, amp = 1, sum = 0, norm = 0;
-  for (let i = 0; i < octaves; i++) {
-    sum += noise.perlin2(x * freq, y * freq) * amp;
-    norm += amp;
-    freq *= lacunarity;
-    amp *= gain;
-  }
-  return (sum / (norm || 1)) * 0.5 + 0.5;
-}
 
 const Zoning = new (class {
   private _noise: Noise | null = null;
@@ -97,7 +87,7 @@ const Zoning = new (class {
   private _macroNoise(x: number, y: number): number {
     const mn = config.zoningModel.macroNoise;
     if (!this._noise) return 0;
-    return fbm(this._noise, x * mn.baseScale, y * mn.baseScale, mn.octaves, mn.lacunarity, mn.gain) * 2 - 1; // [-1,1]
+    return sampleWarpedNoise(this._noise, x * mn.baseScale, y * mn.baseScale, mn.octaves, mn.lacunarity, mn.gain) * 2 - 1; // [-1,1]
   }
 
   private _scoreProcedural(p: Point): Record<ZoneName, number> {
@@ -153,7 +143,7 @@ const Zoning = new (class {
       else z = 'rural';
   } else if (config.zoningModel.mode === 'perlin') {
       const { baseScale, octaves, lacunarity, gain, thresholds } = this._params;
-      const n = fbm(this._noise, p.x * baseScale, p.y * baseScale, octaves, lacunarity, gain);
+      const n = sampleWarpedNoise(this._noise, p.x * baseScale, p.y * baseScale, octaves, lacunarity, gain);
       if (n < thresholds.r1) z = 'rural';
       else if (n < thresholds.r2) z = 'residential';
       else if (n < thresholds.r3) z = 'commercial';

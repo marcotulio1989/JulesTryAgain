@@ -201,6 +201,56 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         return graphics;
     };
 
+    const noiseBucketColors: number[] = [
+        0xDC2626,
+        0x22C55E,
+        0x2563EB,
+        0xEAB308,
+        0xA855F7,
+        0x10B981,
+        0xFBBF24,
+        0xF43F5E,
+    ];
+
+    const noiseRegionToGraphics = (
+        region: NonNullable<CrackRaster['debugRegion']>,
+        spriteW: number,
+        spriteH: number,
+    ): PIXI.Graphics | null => {
+        if (!region || !region.map || region.map.length === 0) return null;
+        const width = Math.max(1, region.w | 0);
+        const height = Math.max(1, region.h | 0);
+        if (region.map.length < width * height) return null;
+        const activeSet = new Set<number>(region.activeBuckets || []);
+        const cellW = (region.cellW && isFinite(region.cellW) && region.cellW > 0)
+            ? region.cellW
+            : (width > 0 ? spriteW / width : spriteW);
+        const cellH = (region.cellH && isFinite(region.cellH) && region.cellH > 0)
+            ? region.cellH
+            : (height > 0 ? spriteH / height : spriteH);
+        const g = new PIXI.Graphics();
+        let drew = false;
+        for (let ry = 0; ry < height; ry++) {
+            for (let rx = 0; rx < width; rx++) {
+                const bucket = region.map[ry * width + rx] ?? 0;
+                const paletteColor = noiseBucketColors[bucket % noiseBucketColors.length];
+                const isActive = activeSet.size === 0 || activeSet.has(bucket);
+                const fillAlpha = isActive ? 0.32 : 0.1;
+                const strokeAlpha = isActive ? 0.45 : 0.18;
+                g.lineStyle(1, paletteColor, strokeAlpha);
+                g.beginFill(paletteColor, fillAlpha);
+                g.drawRect(rx * cellW, ry * cellH, cellW, cellH);
+                g.endFill();
+                drew = true;
+            }
+        }
+        if (!drew) {
+            try { g.destroy(true); } catch (e) {}
+            return null;
+        }
+        return g;
+    };
+
     const maskToGraphics = (
         mask: Uint8Array | null,
         maskWidth: number,
@@ -2146,6 +2196,8 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const spriteW = Math.max(4, Math.ceil(maxX - minX));
                     const spriteH = Math.max(4, Math.ceil(maxY - minY));
                     let cracksDisplay: PIXI.DisplayObject | null = null;
+                    let noiseDebugGraphics: PIXI.Graphics | null = null;
+                    let rasterResult: CrackRaster | null = null;
                     let crashMaskDebugGraphics: PIXI.Graphics | null = null;
                     const crashMaskActive = !!(renderCfg.crashMaskEnabled);
                     const wantCrashMaskDebug = !!(renderCfg.debugCrackMask);
@@ -2160,7 +2212,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     }
 
                     if (useProceduralCracks) {
-                        const raster = generateCrackRaster({
+                        rasterResult = generateCrackRaster({
                             width: spriteW,
                             height: spriteH,
                             minX,
@@ -2170,17 +2222,17 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             debugMask: polygonMask ? { data: polygonMask, width: spriteW, height: spriteH } : undefined,
                             captureCrashMask: crashMaskActive || wantCrashMaskDebug,
                         });
-                        if (raster) {
+                        if (rasterResult) {
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
-                            const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
+                            const graphics = rasterToGraphics(rasterResult, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
                                 cracksDisplay = graphics;
                                 proceduralCrackGraphicsRef.current = graphics;
-                                if (wantCrashMaskDebug && raster.crashMask) {
+                                if (wantCrashMaskDebug && rasterResult.crashMask) {
                                     crashMaskDebugGraphics = maskToGraphics(
-                                        raster.crashMask.data,
-                                        raster.crashMask.width,
-                                        raster.crashMask.height,
+                                        rasterResult.crashMask.data,
+                                        rasterResult.crashMask.width,
+                                        rasterResult.crashMask.height,
                                         spriteW,
                                         spriteH,
                                         0x00FFFF,
@@ -2189,6 +2241,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                                 }
                             }
                         }
+                    }
+
+                    if (renderCfg.showNoiseDelimitations && rasterResult && rasterResult.debugRegion) {
+                        noiseDebugGraphics = noiseRegionToGraphics(rasterResult.debugRegion, spriteW, spriteH);
                     }
 
                     if (!cracksDisplay && textureFromProps && allowTexture) {
@@ -2237,13 +2293,21 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         cracksDisplay = sprite;
                     }
 
-                    if (cracksDisplay) {
+                    const hasVisual = !!(cracksDisplay || noiseDebugGraphics || crashMaskDebugGraphics);
+                    if (hasVisual) {
                         const container = new PIXI.Container();
                         container.x = minX;
                         container.y = minY;
-                        cracksDisplay.x = 0;
-                        cracksDisplay.y = 0;
-                        container.addChild(cracksDisplay);
+                        if (noiseDebugGraphics) {
+                            noiseDebugGraphics.x = 0;
+                            noiseDebugGraphics.y = 0;
+                            container.addChild(noiseDebugGraphics);
+                        }
+                        if (cracksDisplay) {
+                            cracksDisplay.x = 0;
+                            cracksDisplay.y = 0;
+                            container.addChild(cracksDisplay);
+                        }
                         if (crashMaskDebugGraphics) {
                             container.addChild(crashMaskDebugGraphics);
                         }
