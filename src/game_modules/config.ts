@@ -317,6 +317,7 @@ export const config = {
         buckets: 3,
         crackBandWidth: 0.012,
         maxActiveBuckets: 2,
+        simpleCoverage: true,
         // Escolha de quais buckets são ativados: 'smallest' (regiões menores), 'largest', 'random'
         activeBucketStrategy: 'smallest'
     },
