@@ -193,6 +193,7 @@ export interface CrackRasterOptions {
     minY: number;
     renderConfig: any;
     isoToWorld: (point: { x: number; y: number }) => { x: number; y: number };
+    roadWidthHintPx?: number;
 }
 
 export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | null {
@@ -203,6 +204,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         minY,
         renderConfig,
         isoToWorld,
+        roadWidthHintPx,
     } = options;
     const width = Math.max(1, Math.round(widthRaw));
     const height = Math.max(1, Math.round(heightRaw));
@@ -309,7 +311,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                         let id = Math.floor(v * buckets);
                         if (id < 0) id = 0;
                         if (id >= buckets) id = buckets - 1;
-                        debug_regionMap[ry * debug_regionW + rx] = id;
+                    debug_regionMap![ry * debug_regionW + rx] = id;
                     }
                 }
                 const placeholderData = new Uint8ClampedArray(4); // 1 pixel transparent placeholder
@@ -336,8 +338,12 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
 
     const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
     const divisions = (typeof crackCfg.divisions === 'number' && crackCfg.divisions > 0) ? crackCfg.divisions : 400;
-    const thickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
-    const dilateRadius = (typeof crackCfg.dilateRadius === 'number' && crackCfg.dilateRadius >= 0) ? crackCfg.dilateRadius : 2;
+    const baseThickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
+    const baseDilateRadius = (typeof crackCfg.dilateRadius === 'number' && crackCfg.dilateRadius >= 0) ? crackCfg.dilateRadius : 2;
+    const roadWidthHint = (typeof roadWidthHintPx === 'number' && Number.isFinite(roadWidthHintPx)) ? Math.max(0, roadWidthHintPx) : 0;
+    const widthScale = roadWidthHint > 0 ? Math.max(0.3, Math.min(1, roadWidthHint / 32)) : 1;
+    const thickness = Math.max(2, baseThickness * widthScale);
+    const dilateRadius = Math.max(0, Math.round(baseDilateRadius * widthScale * 0.9));
 
     const data = generateVoronoiCrackImage(canvasW, canvasH, {
         divisions,
@@ -387,242 +393,272 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
         const strategy = noiseCfg.activeBucketStrategy || 'smallest';
         const regionSample = Math.max(16, Math.min(128, Math.floor(Math.min(width, height) / 6) || 16));
-        debug_regionW = Math.max(1, Math.floor(width / regionSample));
-        debug_regionH = Math.max(1, Math.floor(height / regionSample));
-        const regionNoise = new Noise(seed || 1);
-        debug_regionMap = new Uint8Array(debug_regionW * debug_regionH);
-        const countsAll = new Array<number>(buckets).fill(0);
-        for (let ry = 0; ry < debug_regionH; ry++) {
-            for (let rx = 0; rx < debug_regionW; rx++) {
-                const sampleX = ((rx + 0.5) / debug_regionW) * width;
-                const sampleY = ((ry + 0.5) / debug_regionH) * height;
-                const screenPt = { x: sampleX + minX, y: sampleY + minY };
-                // In isometric mode other overlays (NoiseZoning) sample noise using
-                // projected/screen coordinates (they map canvas pixels -> scene using
-                // cameraX/cameraY/zoom). To keep behavior consistent and ensure the
-                // Noise area follows zoom/pan, when renderConfig indicates isometric
-                // mode we sample directly in projected coordinates. For non-
-                // isometric mode fall back to the provided isoToWorld mapping.
-                const worldPt = (renderConfig && renderConfig.mode === 'isometric')
-                    ? { x: screenPt.x, y: screenPt.y }
-                    : isoToWorld(screenPt);
-                const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
-                let id = Math.floor(v * buckets);
-                if (id < 0) id = 0;
-                if (id >= buckets) id = buckets - 1;
-                debug_regionMap![ry * debug_regionW + rx] = id;
-                countsAll[id]++;
-            }
-        }
-
-        const statsAll = countsAll.map((c, i) => ({ i, c }));
-        const positiveAll = statsAll.filter(s => s.c > 0);
-        const selectionPool = positiveAll.length > 0 ? positiveAll : statsAll;
-        const rng = (() => {
-            let t = (seed ^ 0x9E3779B9) >>> 0;
-            return () => {
-                t = (t * 1664525 + 1013904223) >>> 0;
-                return t / 0x100000000;
-            };
-        })();
-        const pickByStrategy = (pool: { i: number; c: number }[], count: number) => {
-            if (pool.length === 0 || count <= 0) return [] as { i: number; c: number }[];
-            if (strategy === 'largest') {
-                return pool.slice().sort((a, b) => (b.c - a.c) || (a.i - b.i)).slice(0, count);
-            }
-            if (strategy === 'random') {
-                const arr = pool.slice();
-                for (let i = arr.length - 1; i > 0; i--) {
-                    const j = Math.floor(rng() * (i + 1));
-                    const tmp = arr[i];
-                    arr[i] = arr[j];
-                    arr[j] = tmp;
-                }
-                return arr.slice(0, count);
-            }
-            return pool.slice().sort((a, b) => (a.c - b.c) || (a.i - b.i)).slice(0, count);
-        };
-
-        let picked = pickByStrategy(selectionPool, maxActive);
-        if (picked.length < maxActive) {
-            const fallbackPoolBase = positiveAll.length > 0 ? positiveAll : statsAll;
-            const fallbackPool = fallbackPoolBase.filter(item => !picked.some(p => p.i === item.i));
-            const extra = pickByStrategy(fallbackPool.length > 0 ? fallbackPool : statsAll.filter(item => !picked.some(p => p.i === item.i)), maxActive - picked.length);
-            picked = picked.concat(extra);
-        }
-        if (picked.length < maxActive) {
-            for (let b = 0; picked.length < maxActive && b < buckets; b++) {
-                if (picked.some(p => p.i === b)) continue;
-                picked.push({ i: b, c: 0 });
-            }
-        }
-        let selectedBuckets = new Set<number>(picked.map(p => p.i));
-        if (selectedBuckets.size === 0) {
-            for (let b = 0; b < buckets; b++) selectedBuckets.add(b);
-        }
-
-        // Allow callers to explicitly force which bucket ids are active by
-        // providing `renderConfig.forceActiveBucketIds` (array of numbers).
-        if (renderConfig && Array.isArray((renderConfig as any).forceActiveBucketIds) && (renderConfig as any).forceActiveBucketIds.length > 0) {
-            try {
-                const forced = new Set<number>();
-                for (const v of (renderConfig as any).forceActiveBucketIds) {
-                    const n = Number(v);
-                    if (isFinite(n) && n >= 0 && n < buckets) forced.add(Math.floor(n));
-                }
-                if (forced.size > 0) selectedBuckets = forced;
-            } catch (e) {
-                // ignore malformed input
-            }
-        }
-
-        const initialActiveBuckets = new Set<number>(selectedBuckets);
-        debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
-        debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
-        debug_buckets = buckets;
-        sampleBucketId = (screenX: number, screenY: number) => {
-            const rx = Math.max(0, Math.min(debug_regionW - 1, Math.floor(screenX / (debug_regionCellW || 1))));
-            const ry = Math.max(0, Math.min(debug_regionH - 1, Math.floor(screenY / (debug_regionCellH || 1))));
-            return debug_regionMap![ry * debug_regionW + rx];
-        };
-        const bucketNoise: Noise[] = new Array(buckets);
-        const bucketCenters: number[] = new Array(buckets);
-        const fineScales: number[] = new Array(buckets);
-        for (let b = 0; b < buckets; b++) {
-            bucketNoise[b] = new Noise((seed + b * 97 + 13) >>> 0);
-            bucketCenters[b] = (b + 0.5) / buckets;
-            fineScales[b] = baseScale * (1.5 + b * 0.6);
-        }
-        noiseMaskData = new Uint8Array(width * height);
-        noiseMaskHits = 0;
         const computeWorldPoint = (screenX: number, screenY: number) => {
             const screenPt = { x: screenX + minX, y: screenY + minY };
             return (renderConfig && renderConfig.mode === 'isometric') ? screenPt : isoToWorld(screenPt);
         };
-        const bucketIdsForSampling = Array.from({ length: buckets }, (_v, i) => i);
-        const bucketSlot = new Map<number, number>();
-        bucketIdsForSampling.forEach((bucketId, index) => bucketSlot.set(bucketId, index));
-        const sampleStepPixels = pickMaskSampleStep(width, height, crackBandWidth);
-        const coarseW = Math.max(2, Math.floor((width + sampleStepPixels - 1) / sampleStepPixels) + 1);
-        const coarseH = Math.max(2, Math.floor((height + sampleStepPixels - 1) / sampleStepPixels) + 1);
-        const coarseBase = bucketIdsForSampling.map(() => new Float32Array(coarseW * coarseH));
-        const coarseFine = bucketIdsForSampling.map(() => new Float32Array(coarseW * coarseH));
-        const maskBucketCounts = new Array<number>(buckets).fill(0);
-        const stepOffset = sampleStepPixels * 0.5;
-        for (let gy = 0; gy < coarseH; gy++) {
-            const sampleY = Math.min(height - 0.5, Math.max(0.5, gy * sampleStepPixels + stepOffset));
-            for (let gx = 0; gx < coarseW; gx++) {
-                const sampleX = Math.min(width - 0.5, Math.max(0.5, gx * sampleStepPixels + stepOffset));
-                const worldPt = computeWorldPoint(sampleX, sampleY);
-                const idx = gy * coarseW + gx;
-                for (let bi = 0; bi < bucketIdsForSampling.length; bi++) {
-                    const bucketId = bucketIdsForSampling[bi];
-                    const noiseInst = bucketNoise[bucketId];
-                    coarseBase[bi][idx] = sampleWarpedNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
-                    coarseFine[bi][idx] = sampleWarpedNoise(
-                        noiseInst,
-                        worldPt.x * fineScales[bucketId] * 3.0,
-                        worldPt.y * fineScales[bucketId] * 3.0,
-                        2,
-                        2,
-                        0.6,
-                    );
-                }
-            }
-        }
-        for (let y = 0; y < height; y++) {
-            const pixelY = Math.min(height - 0.5, Math.max(0.5, y + 0.5));
-            let gyFloat = (pixelY - stepOffset) / sampleStepPixels;
-            if (!isFinite(gyFloat)) gyFloat = 0;
-            if (gyFloat < 0) gyFloat = 0;
-            if (gyFloat > coarseH - 1) gyFloat = coarseH - 1;
-            let gy0 = Math.floor(gyFloat);
-            if (gy0 >= coarseH - 1) gy0 = coarseH - 1;
-            const gy1 = Math.min(gy0 + 1, coarseH - 1);
-            const ty = gy1 === gy0 ? 0 : gyFloat - gy0;
-            const row0 = gy0 * coarseW;
-            const row1 = gy1 * coarseW;
-            for (let x = 0; x < width; x++) {
-                const baseIndex = y * width + x;
-                const bucketId = sampleBucketId!(x + 0.5, y + 0.5);
-                const slot = bucketSlot.get(bucketId);
-                if (slot == null) {
-                    noiseMaskData[baseIndex] = 0;
-                    continue;
-                }
-                const pixelX = Math.min(width - 0.5, Math.max(0.5, x + 0.5));
-                let gxFloat = (pixelX - stepOffset) / sampleStepPixels;
-                if (!isFinite(gxFloat)) gxFloat = 0;
-                if (gxFloat < 0) gxFloat = 0;
-                if (gxFloat > coarseW - 1) gxFloat = coarseW - 1;
-                let gx0 = Math.floor(gxFloat);
-                if (gx0 >= coarseW - 1) gx0 = coarseW - 1;
-                const gx1 = Math.min(gx0 + 1, coarseW - 1);
-                const tx = gx1 === gx0 ? 0 : gxFloat - gx0;
-                const baseGrid = coarseBase[slot];
-                const v00 = baseGrid[row0 + gx0];
-                const v10 = baseGrid[row0 + gx1];
-                const v01 = baseGrid[row1 + gx0];
-                const v11 = baseGrid[row1 + gx1];
-                const baseVal = bilerp(v00, v10, v01, v11, tx, ty);
-                const center = bucketCenters[bucketId];
-                const dist = Math.abs(baseVal - center);
-                if (dist > crackBandWidth) {
-                    noiseMaskData[baseIndex] = 0;
-                    continue;
-                }
-                const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
-                const fineGrid = coarseFine[slot];
-                const f00 = fineGrid[row0 + gx0];
-                const f10 = fineGrid[row0 + gx1];
-                const f01 = fineGrid[row1 + gx0];
-                const f11 = fineGrid[row1 + gx1];
-                const fine = bilerp(f00, f10, f01, f11, tx, ty);
-                const modulation = Math.max(0, Math.min(1, Math.pow(edge, 1.15) * (0.45 + 0.55 * fine)));
-                if (modulation <= 0.02) {
-                    noiseMaskData[baseIndex] = 0;
-                    continue;
-                }
-                noiseMaskData[baseIndex] = 255;
-                noiseMaskHits++;
-                maskBucketCounts[bucketId]++;
-            }
-        }
-        const bucketsWithCoverage = maskBucketCounts
-            .map((count, i) => ({ i, c: count }))
-            .filter(entry => entry.c > 0);
+        const simpleCoverage = noiseCfg.simpleCoverage !== false;
+        const coverage = Math.max(0, Math.min(1, typeof noiseCfg.areaCoverage === 'number' ? noiseCfg.areaCoverage : 0.55));
+        const threshold = Math.max(0, Math.min(1, 1 - coverage));
+        const softness = Math.max(0.0015, Math.min(0.2, crackBandWidth * 0.75));
+        const regionNoise = new Noise(seed || 1);
 
-        const ensureAddBucket = (set: Set<number>, id: number) => {
-            if (!set.has(id) && set.size < maxActive) {
-                set.add(id);
+        if (simpleCoverage) {
+            debug_regionW = Math.max(1, Math.floor(width / regionSample));
+            debug_regionH = Math.max(1, Math.floor(height / regionSample));
+            debug_regionMap = new Uint8Array(debug_regionW * debug_regionH);
+            for (let ry = 0; ry < debug_regionH; ry++) {
+                for (let rx = 0; rx < debug_regionW; rx++) {
+                    const sampleX = ((rx + 0.5) / debug_regionW) * width;
+                    const sampleY = ((ry + 0.5) / debug_regionH) * height;
+                    const worldPt = computeWorldPoint(sampleX, sampleY);
+                    const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                    debug_regionMap![ry * debug_regionW + rx] = v >= threshold ? 1 : 0;
+                }
             }
-        };
-        const finalActiveBuckets = new Set<number>();
-        initialActiveBuckets.forEach(id => {
-            if (maskBucketCounts[id] > 0) ensureAddBucket(finalActiveBuckets, id);
-        });
-        if (finalActiveBuckets.size < Math.min(maxActive, bucketsWithCoverage.length)) {
-            const fallbackPool = bucketsWithCoverage.filter(entry => !finalActiveBuckets.has(entry.i));
-            const extra = pickByStrategy(fallbackPool, maxActive - finalActiveBuckets.size);
-            extra.forEach(item => ensureAddBucket(finalActiveBuckets, item.i));
-        }
-        if (finalActiveBuckets.size === 0 && bucketsWithCoverage.length > 0) {
-            const extra = pickByStrategy(bucketsWithCoverage, maxActive);
-            extra.forEach(item => ensureAddBucket(finalActiveBuckets, item.i));
-        }
-        if (finalActiveBuckets.size === 0) {
-            for (let b = 0; b < buckets && finalActiveBuckets.size < maxActive; b++) {
-                ensureAddBucket(finalActiveBuckets, b);
+            debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
+            debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
+            debug_buckets = 2;
+            activeBuckets = new Set<number>([0]);
+            sampleBucketId = () => 0;
+            noiseMaskData = new Uint8Array(width * height);
+            noiseMaskHits = 0;
+            const lowerBound = Math.max(0, threshold - softness);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const baseIndex = y * width + x;
+                    const worldPt = computeWorldPoint(x + 0.5, y + 0.5);
+                    const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                    if (v >= lowerBound) {
+                        noiseMaskData[baseIndex] = 255;
+                        noiseMaskHits++;
+                    } else {
+                        noiseMaskData[baseIndex] = 0;
+                    }
+                }
             }
-        }
+        } else {
+            debug_regionW = Math.max(1, Math.floor(width / regionSample));
+            debug_regionH = Math.max(1, Math.floor(height / regionSample));
+            debug_regionMap = new Uint8Array(debug_regionW * debug_regionH);
+            const countsAll = new Array<number>(buckets).fill(0);
+            for (let ry = 0; ry < debug_regionH; ry++) {
+                for (let rx = 0; rx < debug_regionW; rx++) {
+                    const sampleX = ((rx + 0.5) / debug_regionW) * width;
+                    const sampleY = ((ry + 0.5) / debug_regionH) * height;
+                    const worldPt = computeWorldPoint(sampleX, sampleY);
+                    const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                    let id = Math.floor(v * buckets);
+                    if (id < 0) id = 0;
+                    if (id >= buckets) id = buckets - 1;
+                    debug_regionMap![ry * debug_regionW + rx] = id;
+                    countsAll[id]++;
+                }
+            }
 
-        activeBuckets = finalActiveBuckets;
-        if (activeBuckets.size === 0) {
-            for (let b = 0; b < buckets; b++) activeBuckets.add(b);
-        }
+            const statsAll = countsAll.map((c, i) => ({ i, c }));
+            const positiveAll = statsAll.filter(s => s.c > 0);
+            const selectionPool = positiveAll.length > 0 ? positiveAll : statsAll;
+            const rng = (() => {
+                let t = (seed ^ 0x9E3779B9) >>> 0;
+                return () => {
+                    t = (t * 1664525 + 1013904223) >>> 0;
+                    return t / 0x100000000;
+                };
+            })();
+            const pickByStrategy = (pool: { i: number; c: number }[], count: number) => {
+                if (pool.length === 0 || count <= 0) return [] as { i: number; c: number }[];
+                if (strategy === 'largest') {
+                    return pool.slice().sort((a, b) => (b.c - a.c) || (a.i - b.i)).slice(0, count);
+                }
+                if (strategy === 'random') {
+                    const arr = pool.slice();
+                    for (let i = arr.length - 1; i > 0; i--) {
+                        const j = Math.floor(rng() * (i + 1));
+                        const tmp = arr[i];
+                        arr[i] = arr[j];
+                        arr[j] = tmp;
+                    }
+                    return arr.slice(0, count);
+                }
+                return pool.slice().sort((a, b) => (a.c - b.c) || (a.i - b.i)).slice(0, count);
+            };
 
-        if (noiseMaskHits === 0) {
-            noiseMaskData = null;
+            let picked = pickByStrategy(selectionPool, maxActive);
+            if (picked.length < maxActive) {
+                const fallbackPoolBase = positiveAll.length > 0 ? positiveAll : statsAll;
+                const fallbackPool = fallbackPoolBase.filter(item => !picked.some(p => p.i === item.i));
+                const extra = pickByStrategy(fallbackPool.length > 0 ? fallbackPool : statsAll.filter(item => !picked.some(p => p.i === item.i)), maxActive - picked.length);
+                picked = picked.concat(extra);
+            }
+            if (picked.length < maxActive) {
+                for (let b = 0; picked.length < maxActive && b < buckets; b++) {
+                    if (picked.some(p => p.i === b)) continue;
+                    picked.push({ i: b, c: 0 });
+                }
+            }
+            let selectedBuckets = new Set<number>(picked.map(p => p.i));
+            if (selectedBuckets.size === 0) {
+                for (let b = 0; b < buckets; b++) selectedBuckets.add(b);
+            }
+
+            if (renderConfig && Array.isArray((renderConfig as any).forceActiveBucketIds) && (renderConfig as any).forceActiveBucketIds.length > 0) {
+                try {
+                    const forced = new Set<number>();
+                    for (const v of (renderConfig as any).forceActiveBucketIds) {
+                        const n = Number(v);
+                        if (isFinite(n) && n >= 0 && n < buckets) forced.add(Math.floor(n));
+                    }
+                    if (forced.size > 0) selectedBuckets = forced;
+                } catch (e) {
+                    // ignore malformed input
+                }
+            }
+
+            const initialActiveBuckets = new Set<number>(selectedBuckets);
+            debug_regionCellW = debug_regionW > 0 ? width / debug_regionW : width;
+            debug_regionCellH = debug_regionH > 0 ? height / debug_regionH : height;
+            debug_buckets = buckets;
+            sampleBucketId = (screenX: number, screenY: number) => {
+                const rx = Math.max(0, Math.min(debug_regionW - 1, Math.floor(screenX / (debug_regionCellW || 1))));
+                const ry = Math.max(0, Math.min(debug_regionH - 1, Math.floor(screenY / (debug_regionCellH || 1))));
+                return debug_regionMap![ry * debug_regionW + rx];
+            };
+            const bucketNoise: Noise[] = new Array(buckets);
+            const bucketCenters: number[] = new Array(buckets);
+            const fineScales: number[] = new Array(buckets);
+            for (let b = 0; b < buckets; b++) {
+                bucketNoise[b] = new Noise((seed + b * 97 + 13) >>> 0);
+                bucketCenters[b] = (b + 0.5) / buckets;
+                fineScales[b] = baseScale * (1.5 + b * 0.6);
+            }
+            noiseMaskData = new Uint8Array(width * height);
+            noiseMaskHits = 0;
+            const bucketIdsForSampling = Array.from({ length: buckets }, (_v, i) => i);
+            const bucketSlot = new Map<number, number>();
+            bucketIdsForSampling.forEach((bucketId, index) => bucketSlot.set(bucketId, index));
+            const sampleStepPixels = pickMaskSampleStep(width, height, crackBandWidth);
+            const coarseW = Math.max(2, Math.floor((width + sampleStepPixels - 1) / sampleStepPixels) + 1);
+            const coarseH = Math.max(2, Math.floor((height + sampleStepPixels - 1) / sampleStepPixels) + 1);
+            const coarseBase = bucketIdsForSampling.map(() => new Float32Array(coarseW * coarseH));
+            const coarseFine = bucketIdsForSampling.map(() => new Float32Array(coarseW * coarseH));
+            const maskBucketCounts = new Array<number>(buckets).fill(0);
+            const stepOffset = sampleStepPixels * 0.5;
+            for (let gy = 0; gy < coarseH; gy++) {
+                const sampleY = Math.min(height - 0.5, Math.max(0.5, gy * sampleStepPixels + stepOffset));
+                for (let gx = 0; gx < coarseW; gx++) {
+                    const sampleX = Math.min(width - 0.5, Math.max(0.5, gx * sampleStepPixels + stepOffset));
+                    const worldPt = computeWorldPoint(sampleX, sampleY);
+                    const idx = gy * coarseW + gx;
+                    for (let bi = 0; bi < bucketIdsForSampling.length; bi++) {
+                        const bucketId = bucketIdsForSampling[bi];
+                        const noiseInst = bucketNoise[bucketId];
+                        coarseBase[bi][idx] = sampleWarpedNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                        coarseFine[bi][idx] = sampleWarpedNoise(
+                            noiseInst,
+                            worldPt.x * fineScales[bucketId] * 3.0,
+                            worldPt.y * fineScales[bucketId] * 3.0,
+                            2,
+                            2,
+                            0.6,
+                        );
+                    }
+                }
+            }
+            for (let y = 0; y < height; y++) {
+                const pixelY = Math.min(height - 0.5, Math.max(0.5, y + 0.5));
+                let gyFloat = (pixelY - stepOffset) / sampleStepPixels;
+                if (!isFinite(gyFloat)) gyFloat = 0;
+                if (gyFloat < 0) gyFloat = 0;
+                if (gyFloat > coarseH - 1) gyFloat = coarseH - 1;
+                let gy0 = Math.floor(gyFloat);
+                if (gy0 >= coarseH - 1) gy0 = coarseH - 1;
+                const gy1 = Math.min(gy0 + 1, coarseH - 1);
+                const ty = gy1 === gy0 ? 0 : gyFloat - gy0;
+                const row0 = gy0 * coarseW;
+                const row1 = gy1 * coarseW;
+                for (let x = 0; x < width; x++) {
+                    const baseIndex = y * width + x;
+                    const bucketId = sampleBucketId!(x + 0.5, y + 0.5);
+                    const slot = bucketSlot.get(bucketId);
+                    if (slot == null) {
+                        noiseMaskData[baseIndex] = 0;
+                        continue;
+                    }
+                    const pixelX = Math.min(width - 0.5, Math.max(0.5, x + 0.5));
+                    let gxFloat = (pixelX - stepOffset) / sampleStepPixels;
+                    if (!isFinite(gxFloat)) gxFloat = 0;
+                    if (gxFloat < 0) gxFloat = 0;
+                    if (gxFloat > coarseW - 1) gxFloat = coarseW - 1;
+                    let gx0 = Math.floor(gxFloat);
+                    if (gx0 >= coarseW - 1) gx0 = coarseW - 1;
+                    const gx1 = Math.min(gx0 + 1, coarseW - 1);
+                    const tx = gx1 === gx0 ? 0 : gxFloat - gx0;
+                    const baseGrid = coarseBase[slot];
+                    const v00 = baseGrid[row0 + gx0];
+                    const v10 = baseGrid[row0 + gx1];
+                    const v01 = baseGrid[row1 + gx0];
+                    const v11 = baseGrid[row1 + gx1];
+                    const baseVal = bilerp(v00, v10, v01, v11, tx, ty);
+                    const center = bucketCenters[bucketId];
+                    const dist = Math.abs(baseVal - center);
+                    if (dist > crackBandWidth) {
+                        noiseMaskData[baseIndex] = 0;
+                        continue;
+                    }
+                    const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
+                    const fineGrid = coarseFine[slot];
+                    const f00 = fineGrid[row0 + gx0];
+                    const f10 = fineGrid[row0 + gx1];
+                    const f01 = fineGrid[row1 + gx0];
+                    const f11 = fineGrid[row1 + gx1];
+                    const fine = bilerp(f00, f10, f01, f11, tx, ty);
+                    const modulation = Math.max(0, Math.min(1, Math.pow(edge, 1.15) * (0.45 + 0.55 * fine)));
+                    if (modulation <= 0.02) {
+                        noiseMaskData[baseIndex] = 0;
+                        continue;
+                    }
+                    noiseMaskData[baseIndex] = 255;
+                    noiseMaskHits++;
+                    maskBucketCounts[bucketId]++;
+                }
+            }
+            const bucketsWithCoverage = maskBucketCounts
+                .map((count, i) => ({ i, c: count }))
+                .filter(entry => entry.c > 0);
+
+            const ensureAddBucket = (set: Set<number>, id: number) => {
+                if (!set.has(id) && set.size < maxActive) {
+                    set.add(id);
+                }
+            };
+            const finalActiveBuckets = new Set<number>();
+            initialActiveBuckets.forEach(id => {
+                if (maskBucketCounts[id] > 0) ensureAddBucket(finalActiveBuckets, id);
+            });
+            if (finalActiveBuckets.size < Math.min(maxActive, bucketsWithCoverage.length)) {
+                const fallbackPool = bucketsWithCoverage.filter(entry => !finalActiveBuckets.has(entry.i));
+                const extra = pickByStrategy(fallbackPool, maxActive - finalActiveBuckets.size);
+                extra.forEach(item => ensureAddBucket(finalActiveBuckets, item.i));
+            }
+            if (finalActiveBuckets.size === 0 && bucketsWithCoverage.length > 0) {
+                const extra = pickByStrategy(bucketsWithCoverage, maxActive);
+                extra.forEach(item => ensureAddBucket(finalActiveBuckets, item.i));
+            }
+            if (finalActiveBuckets.size === 0) {
+                for (let b = 0; b < buckets && finalActiveBuckets.size < maxActive; b++) {
+                    ensureAddBucket(finalActiveBuckets, b);
+                }
+            }
+
+            activeBuckets = finalActiveBuckets;
+            if (activeBuckets.size === 0) {
+                for (let b = 0; b < buckets; b++) activeBuckets.add(b);
+            }
+
+            if (noiseMaskHits === 0) {
+                noiseMaskData = null;
+            }
         }
 
         const crackColor: [number, number, number] = [24, 24, 24];

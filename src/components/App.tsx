@@ -188,6 +188,7 @@ const App: React.FC = () => {
             buckets: 3,
             crackBandWidth: 0.008,
             maxActiveBuckets: 2,
+            simpleCoverage: true,
             activeBucketStrategy: 'smallest'
         };
     }
@@ -203,6 +204,7 @@ const App: React.FC = () => {
             buckets,
             crackBandWidth: params.crackBandWidth ?? 0.008,
             maxActiveBuckets: maxActive,
+            simpleCoverage: params.simpleCoverage !== false,
             activeBucketStrategy: params.activeBucketStrategy ?? 'smallest'
         };
     };
