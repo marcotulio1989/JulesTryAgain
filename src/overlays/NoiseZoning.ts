@@ -1,6 +1,6 @@
 /*
  * NoiseZoning Overlay
- * Perlin/fBm-only zoning overlay for city generator
+ * Warped-noise zoning overlay for city generator
  * API: attach(canvas), toggle(), reseed(), redraw()
  * Independent of roads/buildings
  */
@@ -8,22 +8,23 @@ import { ZoneName } from '../game_modules/mapgen';
 import { config } from '../game_modules/config';
 import Zoning from '../game_modules/zoning';
 import { Noise } from 'noisejs';
+import { sampleWarpedNoise } from '../lib/noiseField';
 
-// Simple Perlin noise implementation (can be replaced by external lib)
-function fbm(noise: Noise, x: number, y: number, octaves = 4, lacunarity = 2, gain = 0.5): number {
-  let freq = 1;
-  let amp = 1;
-  let sum = 0;
-  let norm = 0;
-  for (let i = 0; i < octaves; i++) {
-    sum += noise.perlin2(x * freq, y * freq) * amp;
-    norm += amp;
-    freq *= lacunarity;
-    amp *= gain;
-  }
-  // Map from [-norm, norm] to [0,1]
-  return (sum / (norm || 1)) * 0.5 + 0.5;
-}
+
+const bilerp = (v00: number, v10: number, v01: number, v11: number, tx: number, ty: number) => {
+  const top = v00 + (v10 - v00) * tx;
+  const bottom = v01 + (v11 - v01) * tx;
+  return top + (bottom - top) * ty;
+};
+
+const computeSampleStep = (w: number, h: number, zoom: number) => {
+  const diag = Math.sqrt(Math.max(1, w * h));
+  const base = diag / 720;
+  const zoomAdjust = zoom > 0 ? Math.pow(Math.max(zoom, 0.1), 0.35) : 1;
+  const raw = base / zoomAdjust;
+  const step = Math.round(raw);
+  return Math.max(1, Math.min(5, step || 1));
+};
 
 
 export type NoiseZoningAPI = {
@@ -167,12 +168,52 @@ const NoiseZoning: InternalNoiseZoning = {
       this._ctx.putImageData(imageData, 0, 0);
       return;
     }
+    const sampleStep = computeSampleStep(w, h, zoom);
+    const coarseW = Math.max(2, Math.floor((w + sampleStep - 1) / sampleStep) + 1);
+    const coarseH = Math.max(2, Math.floor((h + sampleStep - 1) / sampleStep) + 1);
+    const coarse = new Float32Array(coarseW * coarseH);
+    const stepOffset = sampleStep * 0.5;
+    for (let gy = 0; gy < coarseH; gy++) {
+      const sampleY = Math.min(h - 0.5, Math.max(0.5, gy * sampleStep + stepOffset));
+      const Sy = cameraY + (sampleY - cy) / zoom;
+      for (let gx = 0; gx < coarseW; gx++) {
+        const sampleX = Math.min(w - 0.5, Math.max(0.5, gx * sampleStep + stepOffset));
+        const Sx = cameraX + (sampleX - cx) / zoom;
+        const idx = gy * coarseW + gx;
+        coarse[idx] = sampleWarpedNoise(this._noise, Sx * baseScale, Sy * baseScale, octaves, lacunarity, gain);
+      }
+    }
     for (let y = 0; y < h; y++) {
+      const py = Math.min(h - 0.5, Math.max(0.5, y + 0.5));
+      let gyFloat = (py - stepOffset) / sampleStep;
+      if (!isFinite(gyFloat)) gyFloat = 0;
+      if (gyFloat < 0) gyFloat = 0;
+      if (gyFloat > coarseH - 1) gyFloat = coarseH - 1;
+      let gy0 = Math.floor(gyFloat);
+      if (gy0 >= coarseH - 1) {
+        gy0 = coarseH - 1;
+      }
+      let gy1 = Math.min(gy0 + 1, coarseH - 1);
+      const ty = gy1 === gy0 ? 0 : gyFloat - gy0;
+      const row0 = gy0 * coarseW;
+      const row1 = gy1 * coarseW;
       for (let x = 0; x < w; x++) {
-        // Mapear pixel -> coordenadas de cena, seguindo pan/zoom
-        const Sx = cameraX + (x - cx) / zoom;
-        const Sy = cameraY + (y - cy) / zoom;
-        const n = fbm(this._noise, Sx * baseScale, Sy * baseScale, octaves, lacunarity, gain);
+        const px = Math.min(w - 0.5, Math.max(0.5, x + 0.5));
+        let gxFloat = (px - stepOffset) / sampleStep;
+        if (!isFinite(gxFloat)) gxFloat = 0;
+        if (gxFloat < 0) gxFloat = 0;
+        if (gxFloat > coarseW - 1) gxFloat = coarseW - 1;
+        let gx0 = Math.floor(gxFloat);
+        if (gx0 >= coarseW - 1) {
+          gx0 = coarseW - 1;
+        }
+        let gx1 = Math.min(gx0 + 1, coarseW - 1);
+        const tx = gx1 === gx0 ? 0 : gxFloat - gx0;
+        const v00 = coarse[row0 + gx0];
+        const v10 = coarse[row0 + gx1];
+        const v01 = coarse[row1 + gx0];
+        const v11 = coarse[row1 + gx1];
+        const n = bilerp(v00, v10, v01, v11, tx, ty);
         let zone: ZoneName = 'residential';
         if (n < thresholds.r1) zone = 'rural';
         else if (n < thresholds.r2) zone = 'residential';
@@ -185,7 +226,7 @@ const NoiseZoning: InternalNoiseZoning = {
         imageData.data[idx] = rgb[0];
         imageData.data[idx + 1] = rgb[1];
         imageData.data[idx + 2] = rgb[2];
-    imageData.data[idx + 3] = alpha;
+        imageData.data[idx + 3] = alpha;
       }
     }
     this._ctx.putImageData(imageData, 0, 0);
