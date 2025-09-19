@@ -20,6 +20,17 @@ import { generateCrackRaster, CrackRaster } from '../tools/crackGenerator';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ClipperLib: any = require('clipper-lib');
 
+const NOISE_BUCKET_PALETTE: Array<[number, number, number]> = [
+    [220, 38, 38],    // red
+    [34, 197, 94],    // green
+    [37, 99, 235],    // blue
+    [234, 179, 8],    // yellow
+    [168, 85, 247],   // purple
+    [16, 185, 129],   // teal
+    [251, 191, 36],   // orange
+    [244, 63, 94],    // pink
+];
+
 interface GameCanvasProps {
     interiorTexture?: PIXI.Texture | null;
 }
@@ -73,6 +84,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
     const roadCrackTextureRef = useRef<PIXI.Texture | null>(roadCrackTexture || null);
     const edgeTextureRef = useRef<PIXI.Texture | null>(edgeTexture || null);
     const proceduralCrackGraphicsRef = useRef<PIXI.Graphics | null>(null);
+    const noiseDebugOverlayRef = useRef<PIXI.Graphics | null>(null);
     // Cache para evitar reconstruções pesadas dos marcadores/mascara quando nada mudou
     const laneMarkerCacheRef = useRef<{ key: string; container: PIXI.Container | null } | null>(null);
     const roadLaneScaleRef = useRef<number | undefined>(roadLaneScale);
@@ -239,6 +251,35 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
             try { g.destroy(); } catch (e) {}
             return null;
         }
+        return g;
+    };
+
+    const noiseDelimitationsToGraphics = (
+        region: NonNullable<CrackRaster['debugRegion']>
+    ): PIXI.Graphics | null => {
+        if (!region || region.w <= 0 || region.h <= 0 || !region.map || region.map.length === 0) return null;
+        const { map, w, h, cellW, cellH, minX, minY, activeBuckets } = region;
+        const g = new PIXI.Graphics();
+        const active = new Set<number>((activeBuckets || []).map(v => Math.floor(v)));
+        const highlightActive = active.size > 0;
+        for (let ry = 0; ry < h; ry++) {
+            for (let rx = 0; rx < w; rx++) {
+                const idx = ry * w + rx;
+                if (idx >= map.length) continue;
+                const bucketId = map[idx];
+                const paletteEntry = NOISE_BUCKET_PALETTE[bucketId % NOISE_BUCKET_PALETTE.length];
+                const color = ((paletteEntry[0] & 0xFF) << 16) | ((paletteEntry[1] & 0xFF) << 8) | (paletteEntry[2] & 0xFF);
+                const isActive = !highlightActive || active.has(bucketId);
+                const fillAlpha = isActive ? 0.28 : 0.08;
+                const strokeAlpha = isActive ? 0.7 : 0.25;
+                g.lineStyle(Math.max(0.5, Math.min(2, Math.min(cellW, cellH) * 0.05)), 0xFFFFFF, strokeAlpha);
+                g.beginFill(color, fillAlpha);
+                g.drawRect(rx * cellW, ry * cellH, cellW, cellH);
+                g.endFill();
+            }
+        }
+        g.x = minX;
+        g.y = minY;
         return g;
     };
 
@@ -2077,6 +2118,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                 try { proceduralCrackGraphicsRef.current.destroy(true); } catch (e) {}
                 proceduralCrackGraphicsRef.current = null;
             }
+            if (noiseDebugOverlayRef.current) {
+                try { noiseDebugOverlayRef.current.destroy(true); } catch (e) {}
+                noiseDebugOverlayRef.current = null;
+            }
             roadCrackDisplayRef.current = null;
             const renderCfg = (config as any).render || {};
             const useProceduralCracks = !!renderCfg.crackUseProcedural;
@@ -2159,6 +2204,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         }
                     }
 
+                    let noiseDebugGraphic: PIXI.Graphics | null = null;
                     if (useProceduralCracks) {
                         const raster = generateCrackRaster({
                             width: spriteW,
@@ -2171,6 +2217,9 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             captureCrashMask: crashMaskActive || wantCrashMaskDebug,
                         });
                         if (raster) {
+                            if (renderCfg.showNoiseDelimitations && raster.debugRegion) {
+                                noiseDebugGraphic = noiseDelimitationsToGraphics(raster.debugRegion);
+                            }
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
                             const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
@@ -2235,6 +2284,11 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         }
                         if (typeof roadCrackAlpha === 'number') sprite.alpha = roadCrackAlpha;
                         cracksDisplay = sprite;
+                    }
+
+                    if (noiseDebugGraphic) {
+                        noiseDebugOverlayRef.current = noiseDebugGraphic;
+                        roadCrackOverlay.current?.addChild(noiseDebugGraphic);
                     }
 
                     if (cracksDisplay) {
