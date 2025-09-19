@@ -2089,6 +2089,10 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
             try { console.debug('[GameCanvas] crack overlay -> procedural=', useProceduralCracks, 'hasTexture=', !!textureFromProps, 'allowTexture=', allowTexture); } catch (e) {}
             if (shouldRenderCracks) {
                 const polys: { x: number; y: number }[][] = [];
+                let roadWidthSum = 0;
+                let roadWidthCount = 0;
+                let roadWidthMin = Infinity;
+                let roadWidthMax = 0;
                 let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                 segments.forEach(segment => {
                     const w = segment.width;
@@ -2103,6 +2107,13 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const p4 = { x: eW0.x + nx * (w / 2), y: eW0.y + ny * (w / 2) };
                     const poly = [p1, p2, p3, p4].map(pt => worldToIso(pt));
                     if (poly.length > 2) {
+                        const widthPx = Math.hypot(poly[0].x - poly[1].x, poly[0].y - poly[1].y);
+                        if (Number.isFinite(widthPx) && widthPx > 0.0001) {
+                            roadWidthSum += widthPx;
+                            roadWidthCount++;
+                            if (widthPx < roadWidthMin) roadWidthMin = widthPx;
+                            if (widthPx > roadWidthMax) roadWidthMax = widthPx;
+                        }
                         polys.push(poly);
                         poly.forEach(p => {
                             minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
@@ -2110,6 +2121,11 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         });
                     }
                 });
+                const roadWidthStats = roadWidthCount > 0 ? {
+                    avg: roadWidthSum / roadWidthCount,
+                    min: roadWidthMin === Infinity ? roadWidthSum / roadWidthCount : roadWidthMin,
+                    max: roadWidthMax > 0 ? roadWidthMax : roadWidthSum / roadWidthCount,
+                } : null;
                 if (isFinite(minX) && isFinite(minY) && maxX > minX && maxY > minY) {
                     const defaultPadding = ((config as any).render?.crackMaskPaddingDefault ?? 4) as number;
                     const extraPadding = ((config as any).render?.crackMaskPaddingExtra ?? 8) as number;
@@ -2160,6 +2176,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             minY,
                             renderConfig: renderCfg,
                             isoToWorld,
+                            roadWidthStats: roadWidthStats ?? undefined,
                         });
                         if (raster) {
                         let hasActiveHighlight = false;
