@@ -7,10 +7,12 @@ import TextureLoader from './TextureLoader';
 import TextureGallery from './TextureGallery';
 import ToggleButton from './ToggleButton';
 import MapStore from '../stores/MapStore';
-import { CracksPreview } from './CracksPreview';
 // Controles avançados removidos: sem overlay/zonas aleatórias aqui
 
 const App: React.FC = () => {
+    try {
+        (config as any).render = (config as any).render || {};
+    } catch (e) {}
     const [segmentCountLimit, setSegmentCountLimit] = useState((config as any).mapGeneration.SEGMENT_COUNT_LIMIT);
     const [charSpeed, setCharSpeed] = useState((config as any).controls.characterSpeedMps);
     const [segLen, setSegLen] = useState((config as any).mapGeneration.DEFAULT_SEGMENT_LENGTH);
@@ -163,7 +165,6 @@ const App: React.FC = () => {
 
     const [interiorTexture, setInteriorTexture] = useState<PIXI.Texture | null>(null);
     const [controlsCollapsed, setControlsCollapsed] = useState<boolean>(false);
-    const [showCracksPreview, setShowCracksPreview] = useState<boolean>(false);
     const [roadCrackTexture, setRoadCrackTexture] = useState<PIXI.Texture | null>(null);
     const [edgeTexture, setEdgeTexture] = useState<PIXI.Texture | null>(null);
     const [gallery, setGallery] = useState<Array<{ id:number; name:string; url:string; texture:PIXI.Texture }>>([]);
@@ -176,19 +177,67 @@ const App: React.FC = () => {
     // controls for road crack overlay
     const [crackScale, setCrackScale] = useState<number>(() => safeLoadNumber('roadCrackScale', (config as any).render.roadCrackTextureScale || 1.0));
     const [crackAlpha, setCrackAlpha] = useState<number>(() => safeLoadNumber('roadCrackAlpha', (config as any).render.roadCrackTextureAlpha ?? 0.6));
-    // Padding and threshold for crack mask heuristics
-    const [crackMaskPadding, setCrackMaskPadding] = useState<number>(() => safeLoadNumber('crackMaskPadding', (config as any).render.crackMaskPaddingDefault ?? 4));
-    const [crackMaskTouchEps, setCrackMaskTouchEps] = useState<number>(() => safeLoadNumber('crackMaskTouchEps', (config as any).render.crackMaskTouchEps ?? 1.0));
+    const clampCrackDivisions = (value: number) => Math.max(100, Math.min(4000, Math.round(value)));
+    const clampCrackThickness = (value: number) => Math.max(0.5, Math.min(12, value));
+    const clampCrackSpread = (value: number) => Math.max(0, Math.min(6, value));
+    const clampCrackQuality = (value: number) => Math.max(0.3, Math.min(2.5, value));
+    const [crackDivisions, setCrackDivisions] = useState<number>(() => {
+        const fallback = crackProceduralDefaults.divisions ?? 900;
+        const stored = safeLoadNumber('crack.divisions', fallback);
+        return clampCrackDivisions(stored);
+    });
+    const [crackThickness, setCrackThickness] = useState<number>(() => {
+        const fallback = crackProceduralDefaults.thickness ?? 3.5;
+        const stored = safeLoadNumber('crack.thickness', fallback);
+        return clampCrackThickness(stored);
+    });
+    const [crackSpread, setCrackSpread] = useState<number>(() => {
+        const fallback = crackProceduralDefaults.dilateRadius ?? 1.2;
+        const stored = safeLoadNumber('crack.spread', fallback);
+        return clampCrackSpread(stored);
+    });
+    const [crackQuality, setCrackQuality] = useState<number>(() => {
+        const fallback = crackProceduralDefaults.quality ?? 1;
+        const stored = safeLoadNumber('crack.quality', fallback);
+        return clampCrackQuality(stored);
+    });
     // Crack noise parameters (UI-controllable)
     const [crackUseNoise, setCrackUseNoise] = useState<boolean>(() => {
         try { const v = localStorage.getItem('crackUseNoise'); if (v !== null) return v === 'true'; } catch (e) {}
         return !!(config as any).render.crackUseNoise;
     });
-    // Toggle to enable/disable Crash Mask (procedural cracks masked to road polygons)
-    const [crashMaskEnabled, setCrashMaskEnabled] = useState<boolean>(() => {
-        try { const v = localStorage.getItem('crashMaskEnabled'); if (v !== null) return v === 'true'; } catch (e) {}
-        return !!(config as any).render.crashMaskEnabled;
-    });
+    if (!(config as any).render.crackProceduralParams) {
+        (config as any).render.crackProceduralParams = {
+            divisions: 900,
+            thickness: 3.5,
+            dilateRadius: 1.2,
+            quality: 1,
+            minQuality: 0.35,
+        };
+    }
+    const ensureCrackProceduralDefaults = () => {
+        const params = (config as any).render.crackProceduralParams || {};
+        const next = {
+            divisions: params.divisions ?? 900,
+            thickness: params.thickness ?? 3.5,
+            dilateRadius: params.dilateRadius ?? 1.2,
+            quality: params.quality ?? 1,
+            minQuality: params.minQuality ?? 0.35,
+        };
+        (config as any).render.crackProceduralParams = { ...params, ...next };
+        return (config as any).render.crackProceduralParams;
+    };
+    const crackProceduralDefaultsRef = React.useRef<{
+        divisions: number;
+        thickness: number;
+        dilateRadius: number;
+        quality: number;
+        minQuality?: number;
+    } | null>(null);
+    if (!crackProceduralDefaultsRef.current) {
+        crackProceduralDefaultsRef.current = ensureCrackProceduralDefaults();
+    }
+    const crackProceduralDefaults = crackProceduralDefaultsRef.current!;
     if (!(config as any).render.crackNoiseParams) {
         (config as any).render.crackNoiseParams = {
             baseScale: 1 / 480,
@@ -239,10 +288,14 @@ const App: React.FC = () => {
     const activeBucketsForDisplay = Math.max(1, Math.min(bucketsForDisplay, Math.round(1 + crackAreaCoverage * (bucketsForDisplay - 1))));
     const coveragePercent = Math.round((activeBucketsForDisplay / bucketsForDisplay) * 100);
     const coverageLabel = coveragePercent <= 33 ? 'Baixa' : (coveragePercent >= 67 ? 'Alta' : 'Média');
-    const baseBandDisplay = noiseDefaults.crackBandWidth || 0.008;
-    const minBandDisplay = Math.max(0.001, baseBandDisplay * 0.5);
-    const maxBandDisplay = Math.min(0.05, baseBandDisplay * 2.5);
-    const displayBandWidth = minBandDisplay + (maxBandDisplay - minBandDisplay) * crackAreaCoverage;
+    const baseBandDisplay = noiseDefaults.crackBandWidth || 0.012;
+    const minBandDisplay = Math.max(0.0005, baseBandDisplay * 0.35);
+    const maxBandDisplay = Math.min(0.2, baseBandDisplay * 12);
+    const coverageForBand = Math.pow(Math.min(1, Math.max(0, crackAreaCoverage)), 0.85);
+    const displayBandWidth = minBandDisplay + (maxBandDisplay - minBandDisplay) * coverageForBand;
+    const displayBandWidthLabel = displayBandWidth >= 0.1
+        ? displayBandWidth.toFixed(2)
+        : displayBandWidth.toFixed(3);
     const [edgeScale, setEdgeScale] = useState<number>(() => safeLoadNumber('edgeScale', (config as any).render.edgeTextureScale || 1.0));
     const [edgeAlpha, setEdgeAlpha] = useState<number>(() => safeLoadNumber('edgeAlpha', (config as any).render.edgeTextureAlpha ?? 1.0));
     // controls for road lane overlay
@@ -284,17 +337,6 @@ const App: React.FC = () => {
     };
 
     // Apply a canvas directly as the road crack texture
-    const applyCanvasAsRoadCrack = (canvas: HTMLCanvasElement, target: 'road' | 'edge' | 'both') => {
-        try {
-            const base = new PIXI.BaseTexture(canvas as any);
-            try { base.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch(e) {}
-            const tex = new PIXI.Texture(base);
-            handleRoadCrackLoad(tex, 'preview-canvas');
-        } catch (e) {
-            console.warn('[App] applyCanvasAsRoadCrack failed', e);
-        }
-    };
-
     const handleEdgeLoad = (tex: PIXI.Texture, url: string) => {
         setEdgeTexture(prev => {
             if (prev && (prev as any).baseTexture && (prev as any).baseTexture.destroy) {
@@ -338,13 +380,39 @@ const App: React.FC = () => {
         try { localStorage.setItem('roadCrackScale', String(crackScale)); } catch (e) {}
     }, [crackScale]);
     React.useEffect(() => {
-        try { (config as any).render.crackMaskPaddingDefault = crackMaskPadding; } catch (e) {}
-        try { localStorage.setItem('crackMaskPadding', String(crackMaskPadding)); } catch (e) {}
-    }, [crackMaskPadding]);
+        const clamped = clampCrackDivisions(crackDivisions);
+        try {
+            const current = (config as any).render.crackProceduralParams || {};
+            (config as any).render.crackProceduralParams = { ...current, divisions: clamped };
+        } catch (e) {}
+        try { localStorage.setItem('crack.divisions', String(clamped)); } catch (e) {}
+    }, [crackDivisions]);
     React.useEffect(() => {
-        try { (config as any).render.crackMaskTouchEps = crackMaskTouchEps; } catch (e) {}
-        try { localStorage.setItem('crackMaskTouchEps', String(crackMaskTouchEps)); } catch (e) {}
-    }, [crackMaskTouchEps]);
+        const clamped = clampCrackThickness(crackThickness);
+        try {
+            const current = (config as any).render.crackProceduralParams || {};
+            (config as any).render.crackProceduralParams = { ...current, thickness: clamped };
+        } catch (e) {}
+        try { localStorage.setItem('crack.thickness', String(clamped)); } catch (e) {}
+    }, [crackThickness]);
+    React.useEffect(() => {
+        const clamped = clampCrackSpread(crackSpread);
+        try {
+            const current = (config as any).render.crackProceduralParams || {};
+            (config as any).render.crackProceduralParams = { ...current, dilateRadius: clamped };
+        } catch (e) {}
+        try { localStorage.setItem('crack.spread', String(clamped)); } catch (e) {}
+    }, [crackSpread]);
+    React.useEffect(() => {
+        const clamped = clampCrackQuality(crackQuality);
+        try {
+            const current = (config as any).render.crackProceduralParams || {};
+            const existingMin = (typeof current.minQuality === 'number' && isFinite(current.minQuality)) ? current.minQuality : 0.35;
+            const nextMin = Math.max(0.1, Math.min(clamped, existingMin));
+            (config as any).render.crackProceduralParams = { ...current, quality: clamped, minQuality: nextMin };
+        } catch (e) {}
+        try { localStorage.setItem('crack.quality', String(clamped)); } catch (e) {}
+    }, [crackQuality]);
     // Sync crack noise UI state to config + localStorage
     React.useEffect(() => {
         try { (config as any).render.crackUseNoise = crackUseNoise; } catch (e) {}
@@ -359,10 +427,11 @@ const App: React.FC = () => {
         const buckets = Math.max(1, defaults.buckets || params.buckets || 3);
         const coverage = Math.min(1, Math.max(0, crackAreaCoverage));
         const activeCount = Math.max(1, Math.min(buckets, Math.round(1 + coverage * (buckets - 1))));
-        const baseBand = defaults.crackBandWidth || 0.008;
-        const minBand = Math.max(0.001, baseBand * 0.5);
-        const maxBand = Math.min(0.05, baseBand * 2.5);
-        const computedBand = minBand + (maxBand - minBand) * coverage;
+        const baseBand = defaults.crackBandWidth || 0.012;
+        const minBand = Math.max(0.0005, baseBand * 0.35);
+        const maxBand = Math.min(0.2, baseBand * 12);
+        const coverageForBand = Math.pow(Math.min(1, Math.max(0, coverage)), 0.85);
+        const computedBand = minBand + (maxBand - minBand) * coverageForBand;
         const nextParams = {
             ...params,
             baseScale: defaults.baseScale,
@@ -378,26 +447,11 @@ const App: React.FC = () => {
         try { localStorage.setItem('crack.areaCoverage', String(coverage)); } catch (e) {}
         setUiTick(t => t + 1);
     }, [crackAreaCoverage]);
-    // persist crashMaskEnabled
-    React.useEffect(() => {
-        try { (config as any).render.crashMaskEnabled = crashMaskEnabled; } catch (e) {}
-        try { localStorage.setItem('crashMaskEnabled', String(crashMaskEnabled)); } catch (e) {}
-        setUiTick(t => t + 1);
-    }, [crashMaskEnabled]);
     React.useEffect(() => {
         try { (config as any).render.roadCrackTextureAlpha = crackAlpha; } catch (e) {}
         try { localStorage.setItem('roadCrackAlpha', String(crackAlpha)); } catch (e) {}
     }, [crackAlpha]);
 
-    // Persist crack mask padding and touch epsilon to config and localStorage
-    React.useEffect(() => {
-        try { (config as any).render.crackMaskPaddingDefault = crackMaskPadding; } catch (e) {}
-        try { localStorage.setItem('crackMaskPadding', String(crackMaskPadding)); } catch (e) {}
-    }, [crackMaskPadding]);
-    React.useEffect(() => {
-        try { (config as any).render.crackMaskTouchEps = crackMaskTouchEps; } catch (e) {}
-        try { localStorage.setItem('crackMaskTouchEps', String(crackMaskTouchEps)); } catch (e) {}
-    }, [crackMaskTouchEps]);
     React.useEffect(() => {
         try { (config as any).render.edgeTextureScale = edgeScale; } catch (e) {}
         try { localStorage.setItem('edgeScale', String(edgeScale)); } catch (e) {}
@@ -493,7 +547,6 @@ const App: React.FC = () => {
                 roadCrackTexture={roadCrackTexture} roadCrackScale={crackScale} roadCrackAlpha={crackAlpha}
                 edgeTexture={edgeTexture} edgeScale={edgeScale} edgeAlpha={edgeAlpha}
                 roadLaneTexture={laneTexture} roadLaneScale={laneScale} roadLaneAlpha={laneAlpha}
-                crashMaskEnabled={crashMaskEnabled}
             />
             <div id="control-bar" className={controlsCollapsed ? 'collapsed' : ''}>
                 <button id="control-bar-toggle" onClick={() => setControlsCollapsed(c => !c)} style={{ marginRight: 8 }}>
@@ -785,37 +838,166 @@ const App: React.FC = () => {
                 </div>
                 {/* Crack noise controls */}
                 <div style={{ display: 'inline-block', marginLeft: 12, padding: '6px', border: '1px solid #444', borderRadius: 6 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Crack Noise</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Filtro de rachaduras (ruído)</div>
                     <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Usar fBm para delimitar
+                        <input type="checkbox" checked={crackUseNoise} onChange={(e) => setCrackUseNoise(e.target.checked)} /> Ativar filtro de ruído (define onde as rachaduras aparecem)
                     </label>
-                    <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
-                        <input type="checkbox" checked={crashMaskEnabled} onChange={(e) => setCrashMaskEnabled(e.target.checked)} /> Aplicar Crash Mask (apenas nas vias)
-                    </label>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
-                        <label style={{ fontSize: 12, fontWeight: 600 }}>Quantidade de áreas com rachadura</label>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span style={{ fontSize: 11, opacity: 0.7 }}>Menos</span>
-                            <input
-                                type="range"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={Math.round(crackAreaCoverage * 100)}
-                                onChange={(e) => {
-                                    const raw = parseInt(e.target.value, 10);
-                                    const normalized = isFinite(raw) ? Math.min(1, Math.max(0, raw / 100)) : 0;
-                                    setCrackAreaCoverage(normalized);
-                                }}
-                                style={{ flex: 1 }}
-                            />
-                            <span style={{ fontSize: 11, opacity: 0.7 }}>Mais</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, opacity: crackUseNoise ? 1 : 0.45 }}>
+                            <label style={{ fontSize: 12, fontWeight: 600 }}>Área afetada pelas rachaduras</label>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 11, opacity: 0.7 }}>Menos</span>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    value={Math.round(crackAreaCoverage * 100)}
+                                    onChange={(e) => {
+                                        const raw = parseInt(e.target.value, 10);
+                                        const normalized = isFinite(raw) ? Math.min(1, Math.max(0, raw / 100)) : 0;
+                                        setCrackAreaCoverage(normalized);
+                                    }}
+                                    style={{ flex: 1 }}
+                                    disabled={!crackUseNoise}
+                                />
+                                <span style={{ fontSize: 11, opacity: 0.7 }}>Mais</span>
+                            </div>
+                            <div style={{ fontSize: 11, opacity: 0.8 }}>
+                                Cobertura {coverageLabel} ({coveragePercent}%) · {activeBucketsForDisplay}/{bucketsForDisplay} regiões ativas · faixa ≈ {displayBandWidthLabel}
+                            </div>
+                            <div style={{ fontSize: 10, opacity: 0.6 }}>
+                                Use o slider para decidir quantas regiões de ruído liberam rachaduras e clique em Regenerate após ajustar.
+                            </div>
                         </div>
-                        <div style={{ fontSize: 11, opacity: 0.8 }}>
-                            Cobertura {coverageLabel} ({coveragePercent}%) · {activeBucketsForDisplay}/{bucketsForDisplay} regiões ativas · faixa ≈ {displayBandWidth.toFixed(3)}
-                        </div>
-                        <div style={{ fontSize: 10, opacity: 0.6 }}>
-                            Ajuste o controle e pressione Regenerate para recalcular as rachaduras.
+                        <div style={{ height: 1, background: 'rgba(255,255,255,0.12)' }} />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            <div style={{ fontSize: 12, fontWeight: 600 }}>Padrão das rachaduras (Voronoi)</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <label style={{ fontSize: 11, fontWeight: 600 }}>Quantidade de células base</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <input
+                                        type="range"
+                                        min={150}
+                                        max={2400}
+                                        step={50}
+                                        value={crackDivisions}
+                                        onChange={(e) => {
+                                            const raw = parseInt(e.target.value, 10);
+                                            setCrackDivisions(isFinite(raw) ? clampCrackDivisions(raw) : crackDivisions);
+                                        }}
+                                        style={{ flex: 1 }}
+                                    />
+                                    <input
+                                        type="number"
+                                        min={100}
+                                        max={4000}
+                                        step={10}
+                                        value={crackDivisions}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackDivisions(isFinite(raw) ? clampCrackDivisions(raw) : crackDivisions);
+                                        }}
+                                        style={{ width: 80 }}
+                                    />
+                                </div>
+                                <div style={{ fontSize: 10, opacity: 0.65 }}>
+                                    Mais células geram rachaduras menores e mais distribuídas. Valores aplicados ao gerar o mapa.
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <label style={{ fontSize: 11, fontWeight: 600 }}>Espessura da rachadura</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <input
+                                        type="range"
+                                        min={0.5}
+                                        max={12}
+                                        step={0.1}
+                                        value={crackThickness}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackThickness(isFinite(raw) ? clampCrackThickness(raw) : crackThickness);
+                                        }}
+                                        style={{ flex: 1 }}
+                                    />
+                                    <input
+                                        type="number"
+                                        min={0.5}
+                                        max={12}
+                                        step={0.1}
+                                        value={crackThickness}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackThickness(isFinite(raw) ? clampCrackThickness(raw) : crackThickness);
+                                        }}
+                                        style={{ width: 80 }}
+                                    />
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <label style={{ fontSize: 11, fontWeight: 600 }}>Expansão adicional (dilatação)</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <input
+                                        type="range"
+                                        min={0}
+                                        max={6}
+                                        step={0.1}
+                                        value={crackSpread}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackSpread(isFinite(raw) ? clampCrackSpread(raw) : crackSpread);
+                                        }}
+                                        style={{ flex: 1 }}
+                                    />
+                                    <input
+                                        type="number"
+                                        min={0}
+                                        max={6}
+                                        step={0.1}
+                                        value={crackSpread}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackSpread(isFinite(raw) ? clampCrackSpread(raw) : crackSpread);
+                                        }}
+                                        style={{ width: 80 }}
+                                    />
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                <label style={{ fontSize: 11, fontWeight: 600 }}>Qualidade / detalhe</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <input
+                                        type="range"
+                                        min={0.3}
+                                        max={2.5}
+                                        step={0.05}
+                                        value={crackQuality}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackQuality(isFinite(raw) ? clampCrackQuality(raw) : crackQuality);
+                                        }}
+                                        style={{ flex: 1 }}
+                                    />
+                                    <input
+                                        type="number"
+                                        min={0.3}
+                                        max={2.5}
+                                        step={0.05}
+                                        value={crackQuality}
+                                        onChange={(e) => {
+                                            const raw = parseFloat(e.target.value);
+                                            setCrackQuality(isFinite(raw) ? clampCrackQuality(raw) : crackQuality);
+                                        }}
+                                        style={{ width: 80 }}
+                                    />
+                                </div>
+                                <div style={{ fontSize: 10, opacity: 0.65 }}>
+                                    Valores mais altos aumentam o detalhe das rachaduras mas podem impactar o tempo de geração.
+                                </div>
+                            </div>
+                            <div style={{ fontSize: 10, opacity: 0.6 }}>
+                                Ajuste os parâmetros acima e use Regenerate para ver o resultado no próximo mapa.
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -844,17 +1026,11 @@ const App: React.FC = () => {
                 
                 <button onClick={regenerateMap} style={{ marginLeft: 8 }}>Regenerate</button>
                 <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={showCracksPreview} onChange={(e) => setShowCracksPreview(e.target.checked)} /> Preview Rachaduras
+                    <input type="checkbox" checked={Boolean((config as any).render?.showNoiseDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showNoiseDelimitations: e.target.checked }; try { localStorage.setItem('showNoiseDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show noise delimitations
                 </label>
-                <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={Boolean((config as any).render?.debugCrackMask)} onChange={(e) => { (config as any).render = { ...(config as any).render, debugCrackMask: e.target.checked }; setUiTick(t => t + 1); }} /> Show crack mask debug
-                </label>
-                <label style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                    <input type="checkbox" checked={Boolean((config as any).render?.showFbmDelimitations)} onChange={(e) => { (config as any).render = { ...(config as any).render, showFbmDelimitations: e.target.checked }; try { localStorage.setItem('showFbmDelimitations', String(e.target.checked)); } catch (e) {} setUiTick(t => t + 1); }} /> Show FBM delimitations
-                </label>
-                {/* Small UI panel showing detected FBM buckets and manual overrides */}
+                {/* Small UI panel showing detected noise buckets and manual overrides */}
                 <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    {/* Legend for FBM bucket states */}
+                    {/* Legend for noise bucket states */}
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '6px 8px', borderRadius: 6 }}>
                         <div style={{ display: 'inline-flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
                             <div style={{ fontSize: 11, color: '#EEE', fontWeight: 700 }}>Legenda</div>
@@ -879,13 +1055,13 @@ const App: React.FC = () => {
                     </div>
                     {(() => {
                         try {
-                            const detected: Record<number, number> | undefined = (config as any).render?.detectedFbmBuckets;
+                            const detected: Record<number, number> | undefined = (config as any).render?.detectedNoiseBuckets;
                             const forced: number[] | undefined = (config as any).render?.forceActiveBucketIds;
                             if (!detected) return null;
                             const ids = Object.keys(detected).map(k => parseInt(k, 10)).filter(n => !isNaN(n)).sort((a,b)=>a-b);
                             return (
                                 <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center', background: 'rgba(0,0,0,0.45)', padding: '6px 8px', borderRadius: 6 }}>
-                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>FBM Buckets</div>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#EEE', marginRight: 6 }}>Noise Buckets</div>
                                     {ids.map(id => {
                                         const count = detected[id] || 0;
                                         const active = Array.isArray(forced) ? forced.indexOf(id) >= 0 : false;
@@ -934,6 +1110,7 @@ const App: React.FC = () => {
                                 crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 0.5 },
                                 crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 2, octaves: 3, crackBandWidth: 0.02, maxActiveBuckets: 1 }
                             };
+                            setCrackQuality(0.5);
                             MapActions.generate((config as any).render?.crackSeed || Date.now());
                             setUiTick(t => t + 1);
                         } catch (e) {}
@@ -946,6 +1123,7 @@ const App: React.FC = () => {
                                 crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 1 },
                                 crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 3, octaves: 4, crackBandWidth: 0.012, maxActiveBuckets: 2 }
                             };
+                            setCrackQuality(1);
                             MapActions.generate((config as any).render?.crackSeed || Date.now());
                             setUiTick(t => t + 1);
                         } catch (e) {}
@@ -958,19 +1136,12 @@ const App: React.FC = () => {
                                 crackProceduralParams: { ...(config as any).render?.crackProceduralParams, quality: 2 },
                                 crackNoiseParams: { ...(config as any).render?.crackNoiseParams, buckets: 5, octaves: 5, crackBandWidth: 0.006, maxActiveBuckets: 3 }
                             };
+                            setCrackQuality(2);
                             MapActions.generate((config as any).render?.crackSeed || Date.now());
                             setUiTick(t => t + 1);
                         } catch (e) {}
                     }}>High</button>
                     <span style={{ fontSize: 11, opacity: 0.85, marginLeft: 8 }}>Presets adjust `quality` and noise params; High may be slower or hit canvas clamps.</span>
-                </div>
-                <div style={{ marginLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    <label style={{ fontSize: 12 }}>Mask Pad</label>
-                    <input type="range" min={0} max={32} value={crackMaskPadding} onChange={(e) => { const v = parseInt(e.target.value,10); setCrackMaskPadding(isFinite(v)?v:4); setUiTick(t=>t+1); }} />
-                    <span style={{ width: 36, textAlign: 'right' }}>{crackMaskPadding}px</span>
-                    <label style={{ fontSize: 12, marginLeft: 8 }}>TouchEps</label>
-                    <input type="range" min={0} max={8} step={0.25} value={crackMaskTouchEps} onChange={(e) => { const v = parseFloat(e.target.value); setCrackMaskTouchEps(isFinite(v)?v:1.0); setUiTick(t=>t+1); }} />
-                    <span style={{ width: 44, textAlign: 'right' }}>{crackMaskTouchEps.toFixed(2)}px</span>
                 </div>
                 <a
                     href="/download/citygen.zip"
@@ -1022,37 +1193,6 @@ const App: React.FC = () => {
                     <div>t2: {(config as any).zoningModel.heatmapThresholds.t2.toFixed(2)}</div>
                     <div>t3: {(config as any).zoningModel.heatmapThresholds.t3.toFixed(2)}</div>
                     <div>t4: {(config as any).zoningModel.heatmapThresholds.t4.toFixed(2)}</div>
-                </div>
-            )}
-            {showCracksPreview && (
-                <div style={{ position: 'fixed', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
-                    <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)' }} onClick={() => setShowCracksPreview(false)} />
-                    <div style={{ position: 'relative', background: '#222', padding: 16, borderRadius: 8, boxShadow: '0 10px 30px rgba(0,0,0,0.6)', maxWidth: '90%', maxHeight: '90%', overflow: 'auto' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                            <div style={{ color: '#eee', fontWeight: 700 }}>Preview: Rachaduras → Ruas</div>
-                            <button onClick={() => setShowCracksPreview(false)} style={{ marginLeft: 12 }}>Fechar</button>
-                        </div>
-                        <CracksPreview width={640} height={640} onApplyCanvas={(canvas: HTMLCanvasElement, target: 'road'|'edge'|'both') => {
-                            try {
-                                // destroy previous textures appropriately before creating new ones
-                                if (target === 'road' || target === 'both') {
-                                    // create base texture
-                                    const base = new PIXI.BaseTexture(canvas as any);
-                                    try { base.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch (e) {}
-                                    const tex = new PIXI.Texture(base);
-                                    handleRoadCrackLoad(tex, 'preview-canvas');
-                                }
-                                if (target === 'edge' || target === 'both') {
-                                    const base2 = new PIXI.BaseTexture(canvas as any);
-                                    try { base2.wrapMode = PIXI.WRAP_MODES.REPEAT; } catch (e) {}
-                                    const tex2 = new PIXI.Texture(base2);
-                                    handleEdgeLoad(tex2, 'preview-canvas');
-                                }
-                            } catch (e) {
-                                console.warn('[App] apply preview failed', e);
-                            }
-                        }} />
-                    </div>
                 </div>
             )}
         </div>
