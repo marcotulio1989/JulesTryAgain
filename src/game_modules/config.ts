@@ -285,12 +285,12 @@ export const config = {
     intersectionPatchAlwaysVisibleWithOutlines: true,
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
-    // Toggle procedural crash mask (intersection of FBM buckets & road polygons)
+    // Toggle procedural crash mask (intersection of noise buckets & road polygons)
     crashMaskEnabled: false,
     // Crack mask debug/padding controls (UI-adjustable)
     debugCrackMask: false,
-    // Show FBM delimitations (separate toggle for fBm regions / buckets)
-    showFbmDelimitations: false,
+    // Show noise delimitations (separate toggle for warped-noise regions / buckets)
+    showNoiseDelimitations: false,
     // Default padding (px) used for crack mask bounding boxes
     crackMaskPaddingDefault: 4,
     // Extra padding (px) applied when heuristic triggers — fallback default 8
@@ -305,11 +305,11 @@ export const config = {
         dilateRadius: 2,
         quality: 2,
     },
-    // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
+    // Use warped simplex noise to distribute cracks instead of masking full roads
     crackUseNoise: true,
-    // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
+    // Parâmetros para geração procedural de rachaduras via ruído simplex com domain warp.
     // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
-    // - octaves/lacunarity/gain: parâmetros de fBm.
+    // - octaves/lacunarity/gain: parâmetros que controlam camadas de warping.
     // - buckets: número de regiões quantizadas no mapa de ruído.
     // - crackBandWidth: largura da faixa em torno do centro do bucket que gera rachaduras (0.002..0.1)
     // - maxActiveBuckets: quantos buckets são efetivamente usados para desenhar rachaduras

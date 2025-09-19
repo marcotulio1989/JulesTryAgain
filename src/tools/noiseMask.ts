@@ -1,7 +1,7 @@
 import { Noise } from 'noisejs';
-import { fbmNoise as _fbmNoise } from './crackGenerator';
+import { warpedSimplexNoise } from './noiseSampler';
 
-export interface FbmMaskOptions {
+export interface NoiseMaskOptions {
     width: number;
     height: number;
     minX: number;
@@ -20,10 +20,11 @@ export interface FbmMaskOptions {
 }
 
 /**
- * Generate a binary (0/255) mask using the same FBM bucket strategy used by the
- * crack generator. Returns a Uint8Array of length width*height where 255 = allowed.
+ * Generate a binary (0/255) mask using the same domain-warped noise bucket
+ * strategy used by the crack generator. Returns a Uint8Array of length
+ * width*height where 255 = allowed.
  */
-export function generateFbmMask(opts: FbmMaskOptions): Uint8Array {
+export function generateNoiseMask(opts: NoiseMaskOptions): Uint8Array {
     const width = Math.max(1, Math.round(opts.width));
     const height = Math.max(1, Math.round(opts.height));
     const seed = (typeof opts.seed === 'number') ? (opts.seed >>> 0) : (Date.now() >>> 0);
@@ -49,7 +50,7 @@ export function generateFbmMask(opts: FbmMaskOptions): Uint8Array {
             const sampleY = ((ry + 0.5) / regionH) * height;
             const screenPt = { x: sampleX + (opts.minX || 0), y: sampleY + (opts.minY || 0) };
             const worldPt = (opts.mode === 'isometric') ? { x: screenPt.x, y: screenPt.y } : (opts.isoToWorld ? opts.isoToWorld(screenPt) : screenPt);
-            const v = _fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+            const v = warpedSimplexNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
             let id = Math.floor(v * buckets);
             if (id < 0) id = 0;
             if (id >= buckets) id = buckets - 1;
@@ -109,14 +110,14 @@ export function generateFbmMask(opts: FbmMaskOptions): Uint8Array {
             const noiseInst = bucketNoise[bucketId];
             const samplePt = { x: x + 0.5 + (opts.minX || 0), y: y + 0.5 + (opts.minY || 0) };
             const worldPt = (opts.mode === 'isometric') ? { x: samplePt.x, y: samplePt.y } : (opts.isoToWorld ? opts.isoToWorld(samplePt) : samplePt);
-            const baseVal = _fbmNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+            const baseVal = warpedSimplexNoise(noiseInst, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
             const dist = Math.abs(baseVal - bucketCenters[bucketId]);
             if (dist > crackBandWidth) {
                 mask[y * width + x] = 0;
                 continue;
             }
             const edge = Math.max(0, (crackBandWidth - dist) / crackBandWidth);
-            const fine = _fbmNoise(noiseInst, worldPt.x * fineScales[bucketId] * 3.0, worldPt.y * fineScales[bucketId] * 3.0, 2, 2, 0.6);
+            const fine = warpedSimplexNoise(noiseInst, worldPt.x * fineScales[bucketId] * 3.0, worldPt.y * fineScales[bucketId] * 3.0, 2, 2, 0.6);
             const modulation = Math.max(0, Math.min(1, Math.pow(edge, 1.2) * (0.35 + 0.65 * fine)));
             const keep = modulation > 0.03; // threshold similar to alpha < 12
             mask[y * width + x] = keep ? 255 : 0;
@@ -126,7 +127,7 @@ export function generateFbmMask(opts: FbmMaskOptions): Uint8Array {
     return mask;
 }
 
-export interface FbmRegion {
+export interface NoiseRegion {
     map: Uint8Array;
     w: number;
     h: number;
@@ -137,7 +138,7 @@ export interface FbmRegion {
  * Generate the coarse bucket region map (values 0..buckets-1) without per-pixel
  * band filtering. Useful for visual debugging.
  */
-export function generateFbmRegionMap(opts: FbmMaskOptions): FbmRegion {
+export function generateNoiseRegionMap(opts: NoiseMaskOptions): NoiseRegion {
     const width = Math.max(1, Math.round(opts.width));
     const height = Math.max(1, Math.round(opts.height));
     const seed = (typeof opts.seed === 'number') ? (opts.seed >>> 0) : (Date.now() >>> 0);
@@ -158,7 +159,7 @@ export function generateFbmRegionMap(opts: FbmMaskOptions): FbmRegion {
             const sampleY = ((ry + 0.5) / regionH) * height;
             const screenPt = { x: sampleX + (opts.minX || 0), y: sampleY + (opts.minY || 0) };
             const worldPt = (opts.mode === 'isometric') ? { x: screenPt.x, y: screenPt.y } : (opts.isoToWorld ? opts.isoToWorld(screenPt) : screenPt);
-            const v = _fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+            const v = warpedSimplexNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
             let id = Math.floor(v * buckets);
             if (id < 0) id = 0;
             if (id >= buckets) id = buckets - 1;
@@ -172,7 +173,7 @@ export function generateFbmRegionMap(opts: FbmMaskOptions): FbmRegion {
  * Convert a coarse region map to a visual RGBA image stretched to target width/height.
  * Each bucket gets a simple color; colors are deterministic but arbitrary for debugging.
  */
-export function regionMapToRgbaImage(region: FbmRegion, targetW: number, targetH: number): Uint8ClampedArray {
+export function regionMapToRgbaImage(region: NoiseRegion, targetW: number, targetH: number): Uint8ClampedArray {
     const out = new Uint8ClampedArray(targetW * targetH * 4);
     // simple color palette (repeatable)
     const palette: [number, number, number][] = [
