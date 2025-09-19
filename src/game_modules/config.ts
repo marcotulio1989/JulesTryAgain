@@ -285,12 +285,8 @@ export const config = {
     intersectionPatchAlwaysVisibleWithOutlines: true,
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
-    // Toggle procedural crash mask (intersection of FBM buckets & road polygons)
-    crashMaskEnabled: false,
-    // Crack mask debug/padding controls (UI-adjustable)
-    debugCrackMask: false,
-    // Show FBM delimitations (separate toggle for fBm regions / buckets)
-    showFbmDelimitations: false,
+    // Show warped-noise delimitations (separate toggle for noise regions / buckets)
+    showNoiseDelimitations: false,
     // Default padding (px) used for crack mask bounding boxes
     crackMaskPaddingDefault: 4,
     // Extra padding (px) applied when heuristic triggers — fallback default 8
@@ -301,17 +297,18 @@ export const config = {
     crackUseProcedural: true,
     crackProceduralParams: {
         divisions: 600,
-        thickness: 6,
-        dilateRadius: 2,
+        thickness: 4,
+        dilateRadius: 1,
         quality: 2,
+        patternScale: 1,
     },
-    // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
+    // Use warped noise to distribute cracks instead of masking full roads
     crackUseNoise: true,
-    // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
+    // Parâmetros para geração procedural de rachaduras via campo de ruído distorcido.
     // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
-    // - octaves/lacunarity/gain: parâmetros de fBm.
+    // - octaves/lacunarity/gain: controlam intensidade e detalhamento da distorção.
     // - buckets: número de regiões quantizadas no mapa de ruído.
-    // - crackBandWidth: largura da faixa em torno do centro do bucket que gera rachaduras (0.002..0.1)
+    // - crackBandWidth: largura da faixa em torno do centro do bucket que gera rachaduras (0.002..0.2)
     // - maxActiveBuckets: quantos buckets são efetivamente usados para desenhar rachaduras
     crackNoiseParams: {
         baseScale: 1 / 480,
@@ -319,7 +316,7 @@ export const config = {
         lacunarity: 2.0,
         gain: 0.5,
         buckets: 3,
-        crackBandWidth: 0.008,
+        crackBandWidth: 0.012,
         maxActiveBuckets: 2,
         // Escolha de quais buckets são ativados: 'smallest' (regiões menores), 'largest', 'random'
         activeBucketStrategy: 'smallest'
