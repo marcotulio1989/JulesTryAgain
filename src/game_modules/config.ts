@@ -285,12 +285,12 @@ export const config = {
     intersectionPatchAlwaysVisibleWithOutlines: true,
     // Mostrar contornos dos quarteirões
     showBlockOutlines: true,
-    // Toggle procedural crash mask (intersection of FBM buckets & road polygons)
+    // Toggle procedural crash mask (intersection of warped-noise buckets & road polygons)
     crashMaskEnabled: false,
     // Crack mask debug/padding controls (UI-adjustable)
     debugCrackMask: false,
-    // Show FBM delimitations (separate toggle for fBm regions / buckets)
-    showFbmDelimitations: false,
+    // Show warped-noise delimitations (separate toggle for noise regions / buckets)
+    showNoiseDelimitations: false,
     // Default padding (px) used for crack mask bounding boxes
     crackMaskPaddingDefault: 4,
     // Extra padding (px) applied when heuristic triggers — fallback default 8
@@ -305,24 +305,20 @@ export const config = {
         dilateRadius: 2,
         quality: 2,
     },
-    // Use Perlin/Fbm noise to distribute cracks instead of masking full roads
+    // Use warped noise to distribute cracks instead of masking full roads
     crackUseNoise: true,
-    // Parâmetros para geração procedural de rachaduras via fBm/Perlin.
+    // Parâmetros suavizados para o campo de ruído distorcido.
     // - baseScale: frequência base do ruído (1/meters). Valores maiores => manchas maiores.
-    // - octaves/lacunarity/gain: parâmetros de fBm.
-    // - buckets: número de regiões quantizadas no mapa de ruído.
-    // - crackBandWidth: largura da faixa em torno do centro do bucket que gera rachaduras (0.002..0.1)
-    // - maxActiveBuckets: quantos buckets são efetivamente usados para desenhar rachaduras
+    // - octaves/lacunarity/gain: controlam intensidade e detalhamento da distorção.
+    // - threshold: valor mínimo (0..1) que define onde o ruído libera rachaduras.
+    // - feather: largura da transição suave em torno do threshold.
     crackNoiseParams: {
-        baseScale: 1 / 480,
-        octaves: 4,
-        lacunarity: 2.0,
-        gain: 0.5,
-        buckets: 3,
-        crackBandWidth: 0.008,
-        maxActiveBuckets: 2,
-        // Escolha de quais buckets são ativados: 'smallest' (regiões menores), 'largest', 'random'
-        activeBucketStrategy: 'smallest'
+        baseScale: 1 / 420,
+        octaves: 3,
+        lacunarity: 2.15,
+        gain: 0.55,
+        threshold: 0.62,
+        feather: 0.14,
     },
     // If true, bake cracks directly to a sprite applied to the map (no tiling sprite mask)
     crackApplyDirect: false,
