@@ -25,13 +25,13 @@ const bilerp = (v00: number, v10: number, v01: number, v11: number, tx: number, 
 };
 
 const pickMaskSampleStep = (width: number, height: number, bandWidth: number) => {
-    const area = Math.max(1, width * height);
-    const diag = Math.sqrt(area);
-    const base = diag / 320;
-    const bandRatio = bandWidth > 0 ? bandWidth / 0.012 : 1;
-    const bandFactor = Math.max(0.45, Math.min(1.8, bandRatio));
-    const raw = base * bandFactor;
-    const step = Math.round(raw);
+    const safeW = Math.max(1, width);
+    const safeH = Math.max(1, height);
+    const diag = Math.sqrt(safeW * safeH);
+    const base = Math.max(1, Math.min(5, Math.round(diag / 280)));
+    if (!(bandWidth > 0)) return base;
+    const widthScale = Math.max(0.6, Math.min(1.4, bandWidth / 0.012));
+    const step = Math.round(base * widthScale);
     return Math.max(1, Math.min(6, step || 1));
 };
 
@@ -41,9 +41,12 @@ export function generateVoronoiCrackImage(width: number, height: number, options
     const scale = options.scale ?? 1;
     const color: [number, number, number] = options.color ?? [58, 58, 58];
     const baseDivisions = Math.max(8, Math.min(5000, Math.round(options.divisions)));
-    const referenceArea = 512 * 512;
-    const areaScale = Math.max(0.25, Math.min(8, (sw * sh) / referenceArea));
-    const divisions = Math.max(8, Math.min(5000, Math.round(baseDivisions * areaScale)));
+    const longestDim = Math.max(sw, sh);
+    const sizeScale = Math.max(0.5, Math.min(1.6, longestDim / 512));
+    const divisions = Math.max(8, Math.min(5000, Math.round(baseDivisions * sizeScale)));
+    const narrowDim = Math.max(1, Math.min(sw, sh));
+    const maxThickness = Math.max(1, narrowDim * 0.45);
+    const effectiveThickness = Math.max(0.75, Math.min(options.thickness, maxThickness));
     const rng = makeRng(Math.floor(options.seed) || 1);
     const pts = new Float32Array(divisions * 2);
     for (let i = 0; i < divisions; i++) {
@@ -84,7 +87,7 @@ export function generateVoronoiCrackImage(width: number, height: number, options
     };
 
     const data = new Uint8ClampedArray(sw * sh * 4);
-    const eps = (options.thickness / 10) * scale;
+    const eps = (effectiveThickness / 10) * scale;
 
     for (let y = 0; y < sh; y++) {
         for (let x = 0; x < sw; x++) {
@@ -133,7 +136,8 @@ export function generateVoronoiCrackImage(width: number, height: number, options
         }
     }
 
-    const radius = Math.max(0, Math.min(20, Math.round(options.dilateRadius * scale)));
+    const maxDilate = Math.max(0, Math.min(options.dilateRadius, narrowDim * 0.25));
+    const radius = Math.max(0, Math.min(20, Math.round(maxDilate * scale)));
     if (radius > 0) {
         const copy = new Uint8ClampedArray(data);
         for (let y = 0; y < sh; y++) {
