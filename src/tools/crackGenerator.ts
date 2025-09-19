@@ -1,4 +1,5 @@
 import { Noise } from 'noisejs';
+import { sampleWarpedNoise } from '../lib/noiseField';
 
 export interface CrackGeneratorOptions {
     divisions: number;
@@ -16,18 +17,6 @@ function makeRng(seed: number) {
         return state / 0x100000000;
     };
 }
-
-export const fbmNoise = (
-    noise: Noise,
-    x: number,
-    y: number,
-    _octaves = 1,
-    _lacunarity = 2,
-    _gain = 0.5,
-) => {
-    const value = noise.perlin2(x, y);
-    return value * 0.5 + 0.5;
-};
 
 export function generateVoronoiCrackImage(width: number, height: number, options: CrackGeneratorOptions): Uint8ClampedArray {
     const sw = Math.max(1, Math.round(width));
@@ -160,7 +149,7 @@ export interface CrackRaster {
     height: number;
     quality: number;
     color: [number, number, number];
-    // Optional debug info for noise bucket region visualization (legacy FBM naming)
+    // Optional debug info for noise bucket region visualization (legacy naming kept for backwards compatibility)
     debugRegion?: {
         map: Uint8Array;
         w: number;
@@ -171,6 +160,9 @@ export interface CrackRaster {
         minX: number;
         minY: number;
         quality: number;
+        activeBuckets?: number[];
+        countsAll?: number[];
+        countsInMask?: number[];
     };
     crashMask?: {
         data: Uint8Array;
@@ -207,6 +199,15 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     const width = Math.max(1, Math.round(widthRaw));
     const height = Math.max(1, Math.round(heightRaw));
     const crackCfg = renderConfig?.crackProceduralParams || {};
+    if (renderConfig) {
+        try {
+            delete (renderConfig as any).detectedNoiseBuckets;
+            delete (renderConfig as any).detectedNoiseBucketsInMask;
+            delete (renderConfig as any).activeNoiseBucketIds;
+        } catch (e) {
+            // ignore property cleanup errors (e.g., sealed objects)
+        }
+    }
     const fallbackQuality = (typeof crackCfg.quality === 'number' && isFinite(crackCfg.quality))
         ? crackCfg.quality
         : ((typeof window !== 'undefined' && typeof window.devicePixelRatio === 'number') ? window.devicePixelRatio : 1);
@@ -226,6 +227,82 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         canvasH = Math.max(1, Math.round(height * quality));
     };
 
+
+    let debugMaskData: Uint8Array | null = null;
+    if (debugMask && debugMask.data) {
+        if (debugMask.width === width && debugMask.height === height) {
+            debugMaskData = debugMask.data;
+        } else if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[crackGenerator] Ignoring debugMask due to dimension mismatch', {
+                expected: { width, height }, provided: { width: debugMask.width, height: debugMask.height }
+            });
+        }
+    }
+
+    const selectActiveBuckets = (
+        countsAll: number[],
+        countsInMask: number[],
+        buckets: number,
+        maxActive: number,
+        strategy: string,
+        seedValue: number,
+        debugMaskArr: Uint8Array | null,
+    ) => {
+        const statsAll = countsAll.map((c, i) => ({ i, c }));
+        const statsMask = countsInMask.map((c, i) => ({ i, c }));
+        const positiveMask = statsMask.filter(s => s.c > 0);
+        const positiveAll = statsAll.filter(s => s.c > 0);
+        const selectionPool = debugMaskArr
+            ? (positiveMask.length > 0 ? positiveMask : (positiveAll.length > 0 ? positiveAll : statsMask))
+            : (positiveAll.length > 0 ? positiveAll : statsAll);
+        const rng = (() => {
+            let t = (seedValue ^ 0x9E3779B9) >>> 0;
+            return () => {
+                t = (t * 1664525 + 1013904223) >>> 0;
+                return t / 0x100000000;
+            };
+        })();
+        const pickByStrategy = (pool: { i: number; c: number }[], count: number) => {
+            if (pool.length === 0 || count <= 0) return [] as { i: number; c: number }[];
+            if (strategy === 'largest') {
+                return pool.slice().sort((a, b) => (b.c - a.c) || (a.i - b.i)).slice(0, count);
+            }
+            if (strategy === 'random') {
+                const arr = pool.slice();
+                for (let i = arr.length - 1; i > 0; i--) {
+                    const j = Math.floor(rng() * (i + 1));
+                    const tmp = arr[i];
+                    arr[i] = arr[j];
+                    arr[j] = tmp;
+                }
+                return arr.slice(0, count);
+            }
+            return pool.slice().sort((a, b) => (a.c - b.c) || (a.i - b.i)).slice(0, count);
+        };
+
+        let picked = pickByStrategy(selectionPool, maxActive);
+        if (picked.length < maxActive) {
+            const fallbackPoolBase = positiveAll.length > 0 ? positiveAll : statsAll;
+            const fallbackPool = fallbackPoolBase.filter(item => !picked.some(p => p.i === item.i));
+            const extra = pickByStrategy(
+                fallbackPool.length > 0 ? fallbackPool : statsAll.filter(item => !picked.some(p => p.i === item.i)),
+                maxActive - picked.length,
+            );
+            picked = picked.concat(extra);
+        }
+        if (picked.length < maxActive) {
+            for (let b = 0; picked.length < maxActive && b < buckets; b++) {
+                if (picked.some(p => p.i === b)) continue;
+                picked.push({ i: b, c: 0 });
+            }
+        }
+        const active = new Set<number>(picked.map(p => p.i));
+        if (active.size === 0) {
+            for (let b = 0; b < buckets; b++) active.add(b);
+        }
+        return { active, statsAll, statsMask, picked };
+    };
+
     if (canvasW > maxCanvasDimension || canvasH > maxCanvasDimension) {
         const factor = Math.max(canvasW / maxCanvasDimension, canvasH / maxCanvasDimension);
         applyQualityReduction(factor);
@@ -240,11 +317,11 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         if (typeof console !== 'undefined' && console.warn) {
             console.warn('[crackGenerator] Procedural crack raster skipped – area too large after clamping', { canvasW, canvasH, quality });
         }
-        // If the caller explicitly requested legacy FBM debug delimitations, return a
+        // If the caller explicitly requested legacy noise debug delimitations, return a
         // tiny placeholder raster that includes a coarse `debugRegion` so the
         // UI can still visualize noise buckets even when the full raster is
         // skipped due to clamping limits.
-    if (renderConfig?.showFbmDelimitations && renderConfig?.crackUseNoise) {
+    if (renderConfig?.showNoiseDelimitations && renderConfig?.crackUseNoise) {
             try {
                 const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
                 const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, octaves: 4, lacunarity: 2, gain: 0.5, buckets: 3 };
@@ -253,10 +330,14 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 const lacunarity = noiseCfg.lacunarity || 2;
                 const gain = noiseCfg.gain || 0.5;
                 const buckets = Math.max(1, Math.min(8, noiseCfg.buckets || 3));
+                const maxActive = Math.max(1, Math.min(buckets, noiseCfg.maxActiveBuckets || 2));
+                const strategy = noiseCfg.activeBucketStrategy || 'smallest';
                 const debug_regionW = Math.max(4, Math.min(64, Math.floor(Math.min(width, height) / 32) || 8));
                 const debug_regionH = Math.max(4, Math.min(64, Math.floor(Math.min(width, height) / 32) || 8));
                 const regionNoise = new Noise(seed || 1);
                 const debug_regionMap = new Uint8Array(debug_regionW * debug_regionH);
+                const countsAll = new Array<number>(buckets).fill(0);
+                const countsInMask = new Array<number>(buckets).fill(0);
                 for (let ry = 0; ry < debug_regionH; ry++) {
                     for (let rx = 0; rx < debug_regionW; rx++) {
                         const sampleX = ((rx + 0.5) / debug_regionW) * width;
@@ -265,13 +346,38 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                         const worldPt = (renderConfig && renderConfig.mode === 'isometric')
                             ? { x: screenPt.x, y: screenPt.y }
                             : isoToWorld(screenPt);
-                        const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
+                        const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale, octaves, lacunarity, gain);
                         let id = Math.floor(v * buckets);
                         if (id < 0) id = 0;
                         if (id >= buckets) id = buckets - 1;
                         debug_regionMap[ry * debug_regionW + rx] = id;
+                        countsAll[id]++;
+                        if (!debugMaskData) {
+                            countsInMask[id]++;
+                        } else {
+                            const baseX = Math.max(0, Math.min(width - 1, Math.floor(sampleX)));
+                            const baseY = Math.max(0, Math.min(height - 1, Math.floor(sampleY)));
+                            const baseIndex = baseY * width + baseX;
+                            if (debugMaskData[baseIndex] !== 0) countsInMask[id]++;
+                        }
                     }
                 }
+
+                const selection = selectActiveBuckets(countsAll, countsInMask, buckets, maxActive, strategy, seed, debugMaskData);
+                let activeBuckets = selection.active;
+                if (renderConfig && Array.isArray((renderConfig as any).forceActiveBucketIds) && (renderConfig as any).forceActiveBucketIds.length > 0) {
+                    try {
+                        const forced = new Set<number>();
+                        for (const v of (renderConfig as any).forceActiveBucketIds) {
+                            const n = Number(v);
+                            if (isFinite(n) && n >= 0 && n < buckets) forced.add(Math.floor(n));
+                        }
+                        if (forced.size > 0) activeBuckets = forced;
+                    } catch (err) {
+                        // ignore malformed input
+                    }
+                }
+
                 const placeholderData = new Uint8ClampedArray(4); // 1 pixel transparent placeholder
                 placeholderData[0] = 0; placeholderData[1] = 0; placeholderData[2] = 0; placeholderData[3] = 0;
                 const out: CrackRaster = { data: placeholderData, width: 1, height: 1, quality, color: [24,24,24] };
@@ -285,7 +391,23 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                     minX,
                     minY,
                     quality,
+                    activeBuckets: Array.from(activeBuckets),
+                    countsAll: countsAll.slice(),
+                    countsInMask: countsInMask.slice(),
                 };
+                if (renderConfig) {
+                    try {
+                        const detected: Record<number, number> = {};
+                        for (let i = 0; i < countsAll.length; i++) {
+                            if (countsAll[i] > 0) detected[i] = countsAll[i];
+                        }
+                        (renderConfig as any).detectedNoiseBuckets = detected;
+                        (renderConfig as any).detectedNoiseBucketsInMask = countsInMask.slice();
+                        (renderConfig as any).activeNoiseBucketIds = Array.from(activeBuckets);
+                    } catch (err) {
+                        // ignore assignment issues
+                    }
+                }
                 return out;
             } catch (e) {
                 // fall through to returning null if debug computation fails
@@ -321,22 +443,15 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
     let debug_regionCellW = 0;
     let debug_regionCellH = 0;
     let debug_buckets = 0;
-    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showFbmDelimitations);
-    let debugMaskData: Uint8Array | null = null;
-    if (debugMask && debugMask.data) {
-        if (debugMask.width === width && debugMask.height === height) {
-            debugMaskData = debugMask.data;
-        } else if (typeof console !== 'undefined' && console.warn) {
-            console.warn('[crackGenerator] Ignoring debugMask due to dimension mismatch', {
-                expected: { width, height }, provided: { width: debugMask.width, height: debugMask.height }
-            });
-        }
-    }
+    const attachDebugRegionRequested = !!(renderConfig && renderConfig.showNoiseDelimitations);
     const captureCrashMaskActual = !!(captureCrashMask && debugMaskData);
     const crashMaskData = captureCrashMaskActual ? new Uint8Array(width * height) : null;
     let crashMaskCount = 0;
     let activeBuckets: Set<number> | null = null;
     let sampleBucketId: ((screenX: number, screenY: number) => number) | null = null;
+    let debug_countsAll: number[] | null = null;
+    let debug_countsInMask: number[] | null = null;
+    let debug_activeBucketList: number[] | null = null;
 
     if (renderConfig?.crackUseNoise) {
         const noiseCfg = renderConfig.crackNoiseParams || { baseScale: 1 / 480, buckets: 3, maxActiveBuckets: 2, activeBucketStrategy: 'smallest' };
@@ -365,7 +480,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
                 const worldPt = (renderConfig && renderConfig.mode === 'isometric')
                     ? { x: screenPt.x, y: screenPt.y }
                     : isoToWorld(screenPt);
-                const v = fbmNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale);
+                const v = sampleWarpedNoise(regionNoise, worldPt.x * baseScale, worldPt.y * baseScale);
                 let id = Math.floor(v * buckets);
                 if (id < 0) id = 0;
                 if (id >= buckets) id = buckets - 1;
@@ -384,55 +499,8 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             }
         }
 
-        const statsAll = countsAll.map((c, i) => ({ i, c }));
-        const statsMask = countsInMask.map((c, i) => ({ i, c }));
-        const positiveMask = statsMask.filter(s => s.c > 0);
-        const positiveAll = statsAll.filter(s => s.c > 0);
-        const selectionPool = debugMaskData
-            ? (positiveMask.length > 0 ? positiveMask : (positiveAll.length > 0 ? positiveAll : statsMask))
-            : (positiveAll.length > 0 ? positiveAll : statsAll);
-        const rng = (() => {
-            let t = (seed ^ 0x9E3779B9) >>> 0;
-            return () => {
-                t = (t * 1664525 + 1013904223) >>> 0;
-                return t / 0x100000000;
-            };
-        })();
-        const pickByStrategy = (pool: { i: number; c: number }[], count: number) => {
-            if (pool.length === 0 || count <= 0) return [] as { i: number; c: number }[];
-            if (strategy === 'largest') {
-                return pool.slice().sort((a, b) => (b.c - a.c) || (a.i - b.i)).slice(0, count);
-            }
-            if (strategy === 'random') {
-                const arr = pool.slice();
-                for (let i = arr.length - 1; i > 0; i--) {
-                    const j = Math.floor(rng() * (i + 1));
-                    const tmp = arr[i];
-                    arr[i] = arr[j];
-                    arr[j] = tmp;
-                }
-                return arr.slice(0, count);
-            }
-            return pool.slice().sort((a, b) => (a.c - b.c) || (a.i - b.i)).slice(0, count);
-        };
-
-        let picked = pickByStrategy(selectionPool, maxActive);
-        if (picked.length < maxActive) {
-            const fallbackPoolBase = positiveAll.length > 0 ? positiveAll : statsAll;
-            const fallbackPool = fallbackPoolBase.filter(item => !picked.some(p => p.i === item.i));
-            const extra = pickByStrategy(fallbackPool.length > 0 ? fallbackPool : statsAll.filter(item => !picked.some(p => p.i === item.i)), maxActive - picked.length);
-            picked = picked.concat(extra);
-        }
-        if (picked.length < maxActive) {
-            for (let b = 0; picked.length < maxActive && b < buckets; b++) {
-                if (picked.some(p => p.i === b)) continue;
-                picked.push({ i: b, c: 0 });
-            }
-        }
-        activeBuckets = new Set<number>(picked.map(p => p.i));
-        if (activeBuckets.size === 0) {
-            for (let b = 0; b < buckets; b++) activeBuckets.add(b);
-        }
+        const selection = selectActiveBuckets(countsAll, countsInMask, buckets, maxActive, strategy, seed, debugMaskData);
+        activeBuckets = selection.active;
 
         // Allow callers to explicitly force which bucket ids are active by
         // providing `renderConfig.forceActiveBucketIds` (array of numbers).
@@ -457,6 +525,23 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             const ry = Math.max(0, Math.min(debug_regionH - 1, Math.floor(screenY / (debug_regionCellH || 1))));
             return debug_regionMap![ry * debug_regionW + rx];
         };
+
+        if (renderConfig) {
+            try {
+                const detected: Record<number, number> = {};
+                for (let i = 0; i < countsAll.length; i++) {
+                    if (countsAll[i] > 0) detected[i] = countsAll[i];
+                }
+                (renderConfig as any).detectedNoiseBuckets = detected;
+                (renderConfig as any).detectedNoiseBucketsInMask = countsInMask.slice();
+                (renderConfig as any).activeNoiseBucketIds = Array.from(activeBuckets!);
+            } catch (err) {
+                // ignore assignment issues
+            }
+        }
+        debug_countsAll = countsAll.slice();
+        debug_countsInMask = countsInMask.slice();
+        debug_activeBucketList = Array.from(activeBuckets!);
 
         const palette = [
             [220, 38, 38],    // vermelho
@@ -597,6 +682,9 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
             minX,
             minY,
             quality,
+            activeBuckets: debug_activeBucketList || undefined,
+            countsAll: debug_countsAll || undefined,
+            countsInMask: debug_countsInMask || undefined,
         };
     }
     if (crashMaskData) {

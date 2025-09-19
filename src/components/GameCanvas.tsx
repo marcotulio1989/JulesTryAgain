@@ -201,6 +201,72 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
         return graphics;
     };
 
+    const noiseBucketPalette: Array<[number, number, number]> = [
+        [220, 38, 38],
+        [34, 197, 94],
+        [37, 99, 235],
+        [234, 179, 8],
+        [168, 85, 247],
+        [16, 185, 129],
+        [251, 191, 36],
+        [244, 63, 94],
+    ];
+
+    const buildNoiseRegionOverlay = (
+        region: NonNullable<CrackRaster['debugRegion']>,
+        spriteW: number,
+        spriteH: number,
+        renderCfg: any,
+    ): PIXI.Graphics | null => {
+        if (!region || !region.map || region.map.length === 0 || region.w <= 0 || region.h <= 0) return null;
+        const cellW = (typeof region.cellW === 'number' && isFinite(region.cellW) && region.cellW > 0)
+            ? region.cellW
+            : (region.w > 0 ? spriteW / region.w : spriteW);
+        const cellH = (typeof region.cellH === 'number' && isFinite(region.cellH) && region.cellH > 0)
+            ? region.cellH
+            : (region.h > 0 ? spriteH / region.h : spriteH);
+        const activeSet = new Set<number>();
+        if (Array.isArray(region.activeBuckets)) {
+            for (const v of region.activeBuckets) {
+                const n = Math.floor(Number(v));
+                if (isFinite(n)) activeSet.add(n);
+            }
+        }
+        const highlightActive = activeSet.size > 0;
+        const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+        const activeAlpha = clamp01(typeof renderCfg?.noiseDelimActiveAlpha === 'number' ? renderCfg.noiseDelimActiveAlpha : 0.28);
+        const inactiveAlphaDefault = activeAlpha * 0.35;
+        const inactiveAlpha = clamp01(typeof renderCfg?.noiseDelimInactiveAlpha === 'number' ? renderCfg.noiseDelimInactiveAlpha : inactiveAlphaDefault);
+        const borderAlpha = clamp01(typeof renderCfg?.noiseDelimBorderAlpha === 'number' ? renderCfg.noiseDelimBorderAlpha : 0.5);
+        const inactiveBorderAlpha = clamp01(typeof renderCfg?.noiseDelimBorderInactiveAlpha === 'number'
+            ? renderCfg.noiseDelimBorderInactiveAlpha
+            : borderAlpha * 0.5);
+        const toHex = (col: [number, number, number]) => ((col[0] & 0xFF) << 16) | ((col[1] & 0xFF) << 8) | (col[2] & 0xFF);
+        const overlay = new PIXI.Graphics();
+        const minDim = Math.max(0.5, Math.min(cellW, cellH));
+        const borderWidth = Math.max(1, Math.round(minDim * 0.08));
+        for (let ry = 0; ry < region.h; ry++) {
+            for (let rx = 0; rx < region.w; rx++) {
+                const idx = ry * region.w + rx;
+                const bucketId = region.map[idx] ?? 0;
+                const isActive = !highlightActive || activeSet.has(bucketId);
+                const fillAlpha = isActive ? activeAlpha : inactiveAlpha;
+                if (fillAlpha <= 0) continue;
+                const paletteCol = noiseBucketPalette[bucketId % noiseBucketPalette.length];
+                const x0 = rx * cellW;
+                const y0 = ry * cellH;
+                const x1 = rx === region.w - 1 ? spriteW : (rx + 1) * cellW;
+                const y1 = ry === region.h - 1 ? spriteH : (ry + 1) * cellH;
+                overlay.lineStyle(borderWidth, isActive ? 0xFFFFFF : 0x000000, isActive ? borderAlpha : inactiveBorderAlpha, 0, true);
+                overlay.beginFill(toHex(paletteCol), fillAlpha);
+                overlay.drawRect(x0, y0, Math.max(0.5, x1 - x0), Math.max(0.5, y1 - y0));
+                overlay.endFill();
+            }
+        }
+        try { overlay.cacheAsBitmap = true; } catch (e) {}
+        return overlay;
+    };
+
     const maskToGraphics = (
         mask: Uint8Array | null,
         maskWidth: number,
@@ -2151,6 +2217,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                     const wantCrashMaskDebug = !!(renderCfg.debugCrackMask);
                     const shouldBuildCrashMask = (crashMaskActive || wantCrashMaskDebug) && polys.length > 0;
                     let polygonMask: Uint8Array | null = null;
+                    let noiseDebugRegion: CrackRaster['debugRegion'] | null = null;
                     if (shouldBuildCrashMask) {
                         try {
                             polygonMask = buildPolygonMask(polys, spriteW, spriteH, minX, minY);
@@ -2171,6 +2238,7 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                             captureCrashMask: crashMaskActive || wantCrashMaskDebug,
                         });
                         if (raster) {
+                            noiseDebugRegion = raster.debugRegion || null;
                             const alphaMultiplier = (typeof roadCrackAlpha === 'number' && isFinite(roadCrackAlpha)) ? roadCrackAlpha : 1;
                             const graphics = rasterToGraphics(raster, spriteW, spriteH, alphaMultiplier);
                             if (graphics) {
@@ -2237,16 +2305,30 @@ const GameCanvas: React.FC<GameCanvasPropsInternal> = ({ interiorTexture, interi
                         cracksDisplay = sprite;
                     }
 
+                    const container = new PIXI.Container();
+                    container.x = minX;
+                    container.y = minY;
+                    let containerChildren = 0;
+                    if (renderCfg.showNoiseDelimitations && noiseDebugRegion) {
+                        const noiseOverlay = buildNoiseRegionOverlay(noiseDebugRegion, spriteW, spriteH, renderCfg);
+                        if (noiseOverlay) {
+                            noiseOverlay.x = 0;
+                            noiseOverlay.y = 0;
+                            container.addChild(noiseOverlay);
+                            containerChildren++;
+                        }
+                    }
                     if (cracksDisplay) {
-                        const container = new PIXI.Container();
-                        container.x = minX;
-                        container.y = minY;
                         cracksDisplay.x = 0;
                         cracksDisplay.y = 0;
                         container.addChild(cracksDisplay);
-                        if (crashMaskDebugGraphics) {
-                            container.addChild(crashMaskDebugGraphics);
-                        }
+                        containerChildren++;
+                    }
+                    if (crashMaskDebugGraphics) {
+                        container.addChild(crashMaskDebugGraphics);
+                        containerChildren++;
+                    }
+                    if (containerChildren > 0) {
                         container.addChild(maskG);
                         container.mask = maskG;
                         roadCrackOverlay.current?.addChild(container);
