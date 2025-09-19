@@ -216,7 +216,7 @@ let noise: Noise;
 export type ZoneName = 'downtown' | 'residential' | 'commercial' | 'industrial' | 'rural';
 
 export function getZoneAt(p: Point | { x: number; y: number }): ZoneName {
-    // Zonas puramente por Perlin/fBm (independente das ruas)
+    // Zonas puramente por ruído distorcido (independente das ruas)
     return Zoning.zoneAt(p);
 }
 
@@ -637,7 +637,7 @@ export function generate(seed: string | number): MapGenerationResult {
     // Seeded noise instance for deterministic generation
     const noiseSeed = Math.floor(Math.random() * 65536);
     noise = new Noise(noiseSeed);
-    // Inicializar Zoning com perlin fBm antes da criação das ruas
+    // Inicializar Zoning com o novo campo de ruído distorcido antes da criação das ruas
     Zoning.init(noiseSeed);
     // alinhar heatmap próximo da origem (centro inicial da cidade)
     heatmap.calibrateTo({ x: 0, y: 0 });
