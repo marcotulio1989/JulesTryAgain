@@ -193,6 +193,11 @@ export interface CrackRasterOptions {
     minY: number;
     renderConfig: any;
     isoToWorld: (point: { x: number; y: number }) => { x: number; y: number };
+    roadWidthStats?: {
+        min: number;
+        max: number;
+        avg: number;
+    };
 }
 
 export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | null {
@@ -203,6 +208,7 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         minY,
         renderConfig,
         isoToWorld,
+        roadWidthStats,
     } = options;
     const width = Math.max(1, Math.round(widthRaw));
     const height = Math.max(1, Math.round(heightRaw));
@@ -223,6 +229,10 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
         canvasH = Math.max(1, Math.round(height * quality));
     };
     recomputeCanvasSize();
+
+    const avgRoadWidthPx = (roadWidthStats && Number.isFinite(roadWidthStats.avg) && roadWidthStats.avg > 0)
+        ? roadWidthStats.avg
+        : null;
 
     const applyQualityReduction = (factor: number) => {
         if (!(factor > 1)) return;
@@ -336,8 +346,30 @@ export function generateCrackRaster(options: CrackRasterOptions): CrackRaster | 
 
     const seed = Math.floor((renderConfig?.crackSeed ?? Date.now())) >>> 0;
     const divisions = (typeof crackCfg.divisions === 'number' && crackCfg.divisions > 0) ? crackCfg.divisions : 400;
-    const thickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
-    const dilateRadius = (typeof crackCfg.dilateRadius === 'number' && crackCfg.dilateRadius >= 0) ? crackCfg.dilateRadius : 2;
+    let thickness = (typeof crackCfg.thickness === 'number' && crackCfg.thickness > 0) ? crackCfg.thickness : 6;
+    let dilateRadius = (typeof crackCfg.dilateRadius === 'number' && crackCfg.dilateRadius >= 0) ? crackCfg.dilateRadius : 2;
+
+    if (avgRoadWidthPx != null && isFinite(quality) && quality > 0) {
+        const baseCorePx = (thickness / 10) * quality;
+        const baseDilatePx = dilateRadius * quality;
+        const baseWidthPx = baseCorePx + 2 * baseDilatePx;
+        const minTargetPx = Math.max(0.9, avgRoadWidthPx * 0.18);
+        const minRoadWidthPx = (roadWidthStats && Number.isFinite(roadWidthStats.min) && roadWidthStats.min > 0)
+            ? roadWidthStats.min
+            : null;
+        const narrowLimitPx = minRoadWidthPx != null ? Math.max(0.8, minRoadWidthPx * 0.6) : Infinity;
+        const maxTargetPx = Math.max(minTargetPx, Math.min(4.5, avgRoadWidthPx * 0.5, narrowLimitPx));
+        const targetWidthPx = Math.max(minTargetPx, Math.min(maxTargetPx, avgRoadWidthPx * 0.35));
+        if (isFinite(baseWidthPx) && baseWidthPx > 0 && baseWidthPx > targetWidthPx) {
+            const clampedTarget = Math.max(minTargetPx, Math.min(maxTargetPx, targetWidthPx));
+            let corePx = Math.max(0.4, Math.min(baseCorePx, clampedTarget));
+            if (corePx > clampedTarget) corePx = clampedTarget;
+            const remainingPx = Math.max(0, clampedTarget - corePx);
+            const dilatePx = remainingPx / 2;
+            thickness = Math.max(1, (corePx / quality) * 10);
+            dilateRadius = Math.max(0, dilatePx / quality);
+        }
+    }
 
     const data = generateVoronoiCrackImage(canvasW, canvasH, {
         divisions,
